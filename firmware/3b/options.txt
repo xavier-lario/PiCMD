@@ -46,8 +46,10 @@ CMDHDAtnOutGPIO = 24
 // brings it up on device 30 from the boot ROM.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image.
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image. Enough to hold the
+// whole image means no chunk is ever evicted mid-transfer, which is what
+// keeps writes off the card. Halved automatically if it will not fit.
+//CMDHDCacheMB = 128
 
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
 // WRITE PROTECT and RESET. Button 5 exits emulation (not a CMD HD function).

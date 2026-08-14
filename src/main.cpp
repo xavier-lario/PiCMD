@@ -1358,7 +1358,32 @@ static void CheckOptions()
 
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
-	ScsiImage::InitCache(options.GetCMDHDCacheMB() * 1024 * 1024);
+	// The heap grows from _end and _sbrk has no upper bound, so malloc never
+	// fails however much is asked of it - an oversized cache would quietly hand
+	// out memory past the end of RAM. Ask the firmware what the ARM actually
+	// has and keep a margin free for everything else on the heap.
+	{
+		extern char _end;
+		u32 cacheBytes = options.GetCMDHDCacheMB() * 1024 * 1024;
+		u32 armMemSize = 0;
+
+		RPI_PropertyInit();
+		RPI_PropertyAddTag(TAG_GET_ARM_MEMORY);
+		RPI_PropertyProcess();
+		rpi_mailbox_property_t* mp = RPI_PropertyGet(TAG_GET_ARM_MEMORY);
+		if (mp)
+			armMemSize = (u32)mp->data.buffer_32[1];
+
+		if (armMemSize)
+		{
+			const u32 reserve = 32 * 1024 * 1024;
+			u32 heapBase = (u32)&_end;
+			u32 available = (armMemSize > heapBase + reserve) ? (armMemSize - heapBase - reserve) : 0;
+			if (cacheBytes > available)
+				cacheBytes = available;
+		}
+		ScsiImage::InitCache(cacheBytes);
+	}
 	EMMCBlockingWaitHook = ServiceIECWhileCardBusy;
 
 #if not defined(EXPERIMENTALZERO)
