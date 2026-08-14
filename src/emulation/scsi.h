@@ -129,6 +129,14 @@ public:
 	// forces it; everything else waits for FlushIdle.
 	void Sync(bool force = false);
 
+	// Read the front of the image into the cache and pin it, so that region
+	// never costs an SD access again. Call it at mount and nowhere else: it
+	// goes to the card for as long as it takes, which is only safe while the
+	// bus is quiet. progressSectors/totalSectors drive the on screen bar and
+	// may be null. Returns the number of chunks actually loaded.
+	u32 PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatile u32* totalSectors);
+	static u32 PinnedKB() { return (pinnedChunks * CACHE_CHUNK_SIZE) >> 10; }
+
 	// The (global) cache used by all images.
 	static void InitCache(u32 sizeInBytes);
 	// How much cache was actually obtained. Zero means every access goes
@@ -198,6 +206,11 @@ private:
 	static u8* cachePool;
 	static CacheSlot* cacheSlots;
 	static u32 numCacheSlots;
+
+	// Slots [0, pinnedChunks) belong to image pinnedImage, chunk N in slot N.
+	// The hash covers only what is left, so nothing can collide with them.
+	static u32 pinnedChunks;
+	static u8 pinnedImage;
 
 	u8 imageId;
 

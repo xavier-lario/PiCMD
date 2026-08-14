@@ -755,8 +755,8 @@ void UpdateScreen()
 			if (cacheHits + cacheMisses != oldCacheReads)
 			{
 				oldCacheReads = cacheHits + cacheMisses;
-				snprintf(tempBuffer, tempBufferSize, "cache rd hit %u miss %u   ",
-					cacheHits, cacheMisses);
+				snprintf(tempBuffer, tempBufferSize, "cache rd hit %u miss %u pin %uK   ",
+					cacheHits, cacheMisses, ScsiImage::PinnedKB());
 				screen.PrintText(false, 0, y - 80, tempBuffer, textColour, bgColour);
 			}
 
@@ -1415,6 +1415,7 @@ static void CheckOptions()
 
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
+	piCMDHD.SetPreloadMB(options.GetCMDHDPreloadMB());
 	// Clamp before converting to bytes: the multiply is 32 bit, so 4096 lands on
 	// exactly 2^32 and comes out as zero - which InitCache would round up to its
 	// 16 slot floor and leave a 64KB cache, the worst possible outcome for a

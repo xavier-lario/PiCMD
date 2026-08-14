@@ -130,6 +130,9 @@ public:
 	// patched to this unit number on the fly (VICE behaviour). If zero the
 	// image's own device number is respected.
 	void SetForcedDeviceID(u8 id) { forcedDeviceID = id; }
+	// Megabytes of the image to pull into the cache at mount. Must be set
+	// before Insert; 0 leaves the cache cold.
+	void SetPreloadMB(unsigned mb) { preloadMB = mb; }
 
 	// Memory bus (called by the CPU on every cycle).
 	u8 Read(u16 address);
@@ -176,6 +179,7 @@ private:
 	Interrupt via10IRQ;
 
 	u8 forcedDeviceID;
+	unsigned preloadMB;
 	unsigned headPosition;
 
 	// How many 2MHz cycles between RTC top-ups - half a second, comfortably

@@ -154,6 +154,11 @@ void ScsiImage::Detach()
 		}
 		sizeInSectors = 0;
 
+		// Release the pinned region before invalidating, or the slots it covers
+		// would stay reserved for an image that is no longer here.
+		if (pinnedChunks && pinnedImage == imageId)
+			pinnedChunks = 0;
+
 		for (u32 i = 0; i < numCacheSlots; ++i)
 		{
 			if (cacheSlots[i].valid && cacheSlots[i].image == imageId)
@@ -186,9 +191,20 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!cacheSlots)
 		return 0;
 
-	// 2-way set associative on a multiplicative hash.
-	u32 hash = (chunkIndex * 2654435761u + imageId * 40503u) % numCacheSlots;
-	u32 hash2 = (hash + 1) % numCacheSlots;
+	// Pinned region. Chunk N of the preloaded image lives in slot N and nowhere
+	// else, so nothing can ever evict it and no access to it can reach the
+	// card. A hash would not do: 4096 chunks scattered over 16384 slots two
+	// ways deep still collide often enough to leave a few hundred holes, and
+	// one hole in the wrong place is the whole bug.
+	if (pinnedChunks && imageId == pinnedImage && chunkIndex < pinnedChunks)
+		return &cacheSlots[chunkIndex];
+
+	// 2-way set associative on a multiplicative hash, over whatever is left.
+	u32 span = numCacheSlots - pinnedChunks;
+	if (!span)
+		return 0;
+	u32 hash = pinnedChunks + (chunkIndex * 2654435761u + imageId * 40503u) % span;
+	u32 hash2 = pinnedChunks + (hash + 1 - pinnedChunks) % span;
 
 	CacheSlot* slot = &cacheSlots[hash];
 	if (slot->valid && slot->image == imageId && slot->chunkIndex == chunkIndex)
@@ -267,6 +283,70 @@ void ScsiImage::ResetCounters()
 	dirtyChunkPartialFills = 0;
 	accessLogCount = 0;
 	maxLbaWritten = 0;
+}
+
+u32 ScsiImage::pinnedChunks = 0;
+u8 ScsiImage::pinnedImage = 0;
+
+// Read the front of the image into slots 0..n-1 and pin it there. Called at
+// mount, with the bus quiet and nobody waiting on us, so the cost of going to
+// the card is paid once instead of arriving in the middle of a transfer.
+//
+// Every chunk this covers is one fewer 35ms freeze, and a freeze is what makes
+// the computer decide the drive is not there.
+u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatile u32* totalSectors)
+{
+	if (!cacheSlots || !attached || !maxBytes)
+		return 0;
+
+	// Leave a quarter of the cache hashed, so other images and anything past
+	// the preloaded region still have somewhere to go.
+	u32 chunks = maxBytes >> CACHE_CHUNK_SHIFT;
+	u32 imageChunks = (sizeInSectors + SECTORS_PER_CHUNK - 1) / SECTORS_PER_CHUNK;
+	u32 limit = numCacheSlots - (numCacheSlots >> 2);
+	if (chunks > imageChunks)
+		chunks = imageChunks;
+	if (chunks > limit)
+		chunks = limit;
+	if (!chunks)
+		return 0;
+
+	// Claim the region before filling it, so FindSlot hands back slot N for
+	// chunk N as each one lands.
+	pinnedChunks = chunks;
+	pinnedImage = imageId;
+
+	if (totalSectors)
+		*totalSectors = chunks * SECTORS_PER_CHUNK;
+
+	u32 loaded = 0;
+	for (u32 i = 0; i < chunks; ++i)
+	{
+		CacheSlot& slot = cacheSlots[i];
+		slot.image = imageId;
+		slot.chunkIndex = i;
+		if (FillChunk(i, slot) != 0)
+		{
+			// Leave it invalid rather than pinning a hole full of nothing; the
+			// first read of it will fill it the ordinary way.
+			slot.valid = 0;
+			slot.validMask = 0;
+			slot.dirtyMask = 0;
+		}
+		else
+		{
+			loaded++;
+		}
+		if (progressSectors)
+			*progressSectors = (i + 1) * SECTORS_PER_CHUNK;
+	}
+
+	if (totalSectors)
+		*totalSectors = 0;
+
+	DEBUG_LOG("SCSI: preloaded %u of %u chunks (%u KB pinned)\r\n",
+		loaded, chunks, (chunks * CACHE_CHUNK_SIZE) >> 10);
+	return loaded;
 }
 
 void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)

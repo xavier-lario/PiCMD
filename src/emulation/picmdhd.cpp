@@ -329,6 +329,7 @@ void PiCMDHD::Initialise()
 	scanNeeded = true;
 	LEDs = 0;
 	forcedDeviceID = 0;
+	preloadMB = 0;
 	headPosition = 0;
 	imagesize = 0;
 	baselba = INVALID_BASELBA;
@@ -571,6 +572,16 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 	imagesize = disk[0].SizeInSectors();
 	scanNeeded = true;
 	FindBaseLBA();
+
+	// Pull the working area of the image into RAM while nothing is listening.
+	// A cache miss costs an SD access, an SD access freezes the emulated CPU
+	// for tens of milliseconds, and the bus gives up on us long before that -
+	// so the miss that lands in the middle of a transfer is fatal. Paying for
+	// them all here, once, is the whole point.
+	if (preloadMB)
+	{
+		disk[0].PreloadCache(preloadMB * 1024 * 1024, &scanSector, &scanTotal);
+	}
 
 	// The scan above walks the whole image off the card, so it sets the stall
 	// watermark and the read counters before the computer has asked for
