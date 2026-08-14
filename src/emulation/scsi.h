@@ -71,6 +71,14 @@ public:
 	// left alone.
 	static u32 AccessCounter() { return accessCounter; }
 
+	// How many times a slot had to be taken from a chunk that still had
+	// unwritten sectors in it. Every one of those is a synchronous write to
+	// the card from inside ReadSector/WriteSector - the exact stall the cache
+	// is supposed to prevent. If this stays at zero the cache is coping; if it
+	// climbs during a transfer, that is where the drive is going deaf.
+	static u32 DirtyEvictions() { return dirtyEvictions; }
+	static void ResetDirtyEvictions() { dirtyEvictions = 0; }
+
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
 	// cannot answer ATN.
@@ -95,6 +103,7 @@ private:
 	bool needSync;
 	static u32 worstStallMicros;
 	static u32 accessCounter;
+	static u32 dirtyEvictions;
 
 	char name[256];
 

@@ -199,8 +199,15 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 
 	// Never drop writes on the floor. The chunk being evicted may belong to
 	// another image, so flush it through whoever owns it.
+	//
+	// This is the one path that can still put an SD write in the middle of a
+	// WriteSector, contradicting the promise made there. It only happens when
+	// every way of the set is dirty, which in turn only happens when FlushIdle
+	// has not had a quiet moment to run - exactly the case during a long
+	// transfer. Count it so it stops being guesswork.
 	if (victim->valid && victim->dirtyMask)
 	{
+		dirtyEvictions++;
 		ScsiImage* owner = ImageById(victim->image);
 		if (owner)
 			owner->FlushChunk(*victim);
@@ -219,6 +226,7 @@ ScsiImage* ScsiImage::attachedImages[64] = { 0 };
 u32 ScsiImage::numAttachedImages = 0;
 u32 ScsiImage::worstStallMicros = 0;
 u32 ScsiImage::accessCounter = 0;
+u32 ScsiImage::dirtyEvictions = 0;
 
 void ScsiImage::FlushIdle()
 {

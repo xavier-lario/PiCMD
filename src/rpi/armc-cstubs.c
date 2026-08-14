@@ -64,6 +64,7 @@ extern int errno;
 
 /* Prototype for the UART write function */
 #include "rpi-aux.h"
+#include "cache.h"
 
 /* A pointer to a list of environment variables and their values. For a minimal
  environment, this empty list is adequate: */
@@ -200,6 +201,22 @@ caddr_t _sbrk(int incr)
 
   if (heap_end == 0)
     heap_end = &_end;
+
+  /* This used to hand out memory unconditionally, which meant malloc could
+     never fail: it returned a pointer no matter how much was asked for, and
+     the caller then used memory that either does not exist or - worse - sits
+     above UNCACHED_MEM_BASE, where the page tables mark RAM as uncacheable.
+     A large CMD HD disk cache landed there and every access to it went to
+     bare SDRAM with no L1/L2 behind it.
+
+     Cap the heap at the top of cacheable RAM and report failure properly, so
+     an oversized request degrades into a smaller allocation instead of
+     silently corrupting or crawling. */
+  if (incr > 0 && (unsigned)(heap_end + incr) > (unsigned)UNCACHED_MEM_BASE)
+  {
+    errno = ENOMEM;
+    return (caddr_t) -1;
+  }
 
   prev_heap_end = heap_end;
   heap_end += incr;
