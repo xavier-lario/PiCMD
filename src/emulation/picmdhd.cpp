@@ -617,6 +617,11 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 
 void PiCMDHD::Eject()
 {
+	// Last chance to get the access log off the machine. The bus is finished
+	// with us by now, so the card can take as long as it likes. Done before
+	// the Detach loop only so a failure here cannot leave an image attached.
+	ScsiImage::DumpAccessLog("PICMD-LBA.LOG");
+
 	for (int i = 0; i < SCSI_MAX_DISKS; i++)
 	{
 		disk[i].Detach();

@@ -103,10 +103,21 @@ public:
 	static u32 DirtyChunkReads() { return dirtyChunkReads; }
 	static u32 DirtyChunkPartialFills() { return dirtyChunkPartialFills; }
 
-	// Zero every counter above, plus the stall watermark. Called on mount so
-	// the figures describe what the computer went on to do rather than the
-	// whole disk scan that precedes it.
+	// Zero every counter above, plus the stall watermark and the access log.
+	// Called on mount so the figures describe what the computer went on to do
+	// rather than the whole disk scan that precedes it - the scan alone is
+	// imagesize/128 reads, which would fill the log before the computer has
+	// asked for anything.
 	static void ResetCounters();
+
+	// Every sector access in order, so the pattern around a failure can be
+	// read back afterwards. The contents are known good by now; what is not
+	// known is where they were going. Held in RAM and written out on eject,
+	// because going to the card while the bus is live is what breaks the
+	// drive.
+	static u32 AccessLogCount() { return accessLogCount; }
+	static u32 MaxLbaWritten() { return maxLbaWritten; }
+	static bool DumpAccessLog(const char* filename);
 
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
@@ -137,6 +148,23 @@ private:
 	static u32 cacheReadMisses;
 	static u32 dirtyChunkReads;
 	static u32 dirtyChunkPartialFills;
+
+	// 16K entries at 8 bytes is 128KB of BSS, and covers a GEOS install with
+	// room to spare. If it ever wraps, accessLogCount says so and the dump
+	// prints the surviving tail in order.
+	static const u32 ACCESS_LOG_ENTRIES = 16384;
+	struct AccessLogEntry
+	{
+		u32 lba;
+		u8 op;			// 'R' cached read, 'W' write, 'U' uncached read
+		u8 image;
+		u8 result;		// 0 = accepted, 1 = refused (out of range, detached)
+		u8 pad;
+	};
+	static AccessLogEntry accessLog[ACCESS_LOG_ENTRIES];
+	static u32 accessLogCount;		// total accesses, not entries held
+	static u32 maxLbaWritten;
+	void LogAccess(u32 lba, u8 op, u8 result);
 
 	char name[256];
 

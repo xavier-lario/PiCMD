@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "scsi.h"
 #include "debug.h"
 #include "rpihardware.h"
@@ -252,6 +253,10 @@ u32 ScsiImage::cacheReadMisses = 0;
 u32 ScsiImage::dirtyChunkReads = 0;
 u32 ScsiImage::dirtyChunkPartialFills = 0;
 
+ScsiImage::AccessLogEntry ScsiImage::accessLog[ScsiImage::ACCESS_LOG_ENTRIES];
+u32 ScsiImage::accessLogCount = 0;
+u32 ScsiImage::maxLbaWritten = 0;
+
 void ScsiImage::ResetCounters()
 {
 	worstStallMicros = 0;
@@ -260,6 +265,59 @@ void ScsiImage::ResetCounters()
 	cacheReadMisses = 0;
 	dirtyChunkReads = 0;
 	dirtyChunkPartialFills = 0;
+	accessLogCount = 0;
+	maxLbaWritten = 0;
+}
+
+void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
+{
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].lba = lba;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].op = op;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].image = imageId;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].result = result;
+	accessLogCount++;
+
+	if (op == 'W' && result == 0 && lba > maxLbaWritten)
+		maxLbaWritten = lba;
+}
+
+// Write the log out as text. Only ever called from eject, when the bus is
+// already done with us and a slow card costs nothing.
+bool ScsiImage::DumpAccessLog(const char* filename)
+{
+	if (accessLogCount == 0)
+		return false;
+
+	FIL fp;
+	if (f_open(&fp, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+		return false;
+
+	char line[128];
+	UINT written;
+	bool wrapped = accessLogCount > ACCESS_LOG_ENTRIES;
+	u32 held = wrapped ? ACCESS_LOG_ENTRIES : accessLogCount;
+	u32 first = wrapped ? accessLogCount - ACCESS_LOG_ENTRIES : 0;
+
+	int n = snprintf(line, sizeof(line),
+		"# seq op lba image result   (op: R cached read, W write, U uncached read)\r\n"
+		"# %u accesses, %u held%s, max lba written %u\r\n",
+		accessLogCount, held, wrapped ? " (wrapped, oldest lost)" : "", maxLbaWritten);
+	f_write(&fp, line, n, &written);
+
+	for (u32 i = 0; i < held; ++i)
+	{
+		const AccessLogEntry& e = accessLog[(first + i) % ACCESS_LOG_ENTRIES];
+		n = snprintf(line, sizeof(line), "%u %c %u %u %u\r\n",
+			first + i, (char)e.op, e.lba, (unsigned)e.image, (unsigned)e.result);
+		if (f_write(&fp, line, n, &written) != FR_OK || written != (UINT)n)
+		{
+			f_close(&fp);
+			return false;
+		}
+	}
+
+	f_close(&fp);
+	return true;
 }
 
 void ScsiImage::FlushIdle()
@@ -319,14 +377,20 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 {
 	accessCounter++;
 	if (!attached)
+	{
+		LogAccess(lba, 'R', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
 	{
 		// Reads beyond the end of the image return zeros (matches VICE).
+		LogAccess(lba, 'R', 1);
 		memset(buffer, 0, SECTOR_SIZE);
 		return 0;
 	}
+
+	LogAccess(lba, 'R', 0);
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
@@ -400,13 +464,19 @@ int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 {
 	accessCounter++;
 	if (!attached)
+	{
+		LogAccess(lba, 'U', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
 	{
+		LogAccess(lba, 'U', 1);
 		memset(buffer, 0, SECTOR_SIZE);
 		return 0;
 	}
+
+	LogAccess(lba, 'U', 0);
 
 	// If the sector happens to be cached, take it from there - but never fill
 	// the cache on its account. A slot being valid only says the chunk is
@@ -432,10 +502,18 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 {
 	accessCounter++;
 	if (!attached || readOnly)
+	{
+		LogAccess(lba, 'W', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
+	{
+		LogAccess(lba, 'W', 1);
 		return -1;
+	}
+
+	LogAccess(lba, 'W', 0);
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;

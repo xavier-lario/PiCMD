@@ -776,6 +776,19 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 96, tempBuffer, textColour, bgColour);
 			}
 
+			// Total accesses and the highest sector written. The log behind
+			// these goes to PICMD-LBA.LOG on eject; this is the summary that
+			// is readable without pulling the card.
+			static u32 oldAccessLog = 0xffffffff;
+			u32 accessLog = ScsiImage::AccessLogCount();
+			if (accessLog != oldAccessLog)
+			{
+				oldAccessLog = accessLog;
+				snprintf(tempBuffer, tempBufferSize, "accesses %u max wr lba %u   ",
+					accessLog, ScsiImage::MaxLbaWritten());
+				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
+			}
+
 			static u32 oldScanPercent = 0xffffffff;
 			if (piCMDHD.IsScanning())
 			{
