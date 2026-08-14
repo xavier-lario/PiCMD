@@ -319,26 +319,66 @@ u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatil
 	if (totalSectors)
 		*totalSectors = chunks * SECTORS_PER_CHUNK;
 
-	u32 loaded = 0;
+	// Chunk N is pinned to slot N and slot N's data is cachePool + N*4K, so the
+	// whole region is contiguous in memory as well as in the file. Read it in
+	// big blocks: chunk at a time meant thousands of separate seeks and reads,
+	// which at this card's latency turned the mount into minutes.
+	const u32 BLOCK = 1u << 20;
+	u32 wanted = chunks * CACHE_CHUNK_SIZE;
+	u32 done = 0;
+
+	if (f_lseek(&file, 0) != FR_OK)
+	{
+		pinnedChunks = 0;
+		if (totalSectors)
+			*totalSectors = 0;
+		return 0;
+	}
+
+	while (done < wanted)
+	{
+		u32 ask = wanted - done;
+		if (ask > BLOCK)
+			ask = BLOCK;
+
+		UINT got = 0;
+		if (f_read(&file, cachePool + done, ask, &got) != FR_OK)
+			break;
+
+		done += got;
+		if (progressSectors)
+			*progressSectors = done / SECTOR_SIZE;
+
+		if (got < ask)
+			break;			// end of file
+	}
+
+	// Anything the file did not cover reads as zeros, the same contract
+	// FillChunk honours past EOF.
+	if (done < wanted)
+		memset(cachePool + done, 0, wanted - done);
+
+	u32 loaded = done >> CACHE_CHUNK_SHIFT;
+
 	for (u32 i = 0; i < chunks; ++i)
 	{
 		CacheSlot& slot = cacheSlots[i];
 		slot.image = imageId;
 		slot.chunkIndex = i;
-		if (FillChunk(i, slot) != 0)
+		slot.dirtyMask = 0;
+		// Only whole chunks that actually arrived are presented as valid. A
+		// partial tail is left cold so the first read fills it the usual way
+		// rather than serving a half read chunk as if it were real.
+		if (i < loaded)
 		{
-			// Leave it invalid rather than pinning a hole full of nothing; the
-			// first read of it will fill it the ordinary way.
-			slot.valid = 0;
-			slot.validMask = 0;
-			slot.dirtyMask = 0;
+			slot.valid = 1;
+			slot.validMask = 0xff;
 		}
 		else
 		{
-			loaded++;
+			slot.valid = 0;
+			slot.validMask = 0;
 		}
-		if (progressSectors)
-			*progressSectors = (i + 1) * SECTORS_PER_CHUNK;
 	}
 
 	if (totalSectors)
