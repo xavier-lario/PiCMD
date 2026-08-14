@@ -178,6 +178,11 @@ private:
 	u8 forcedDeviceID;
 	unsigned headPosition;
 
+	// How many 2MHz cycles between RTC top-ups - half a second, comfortably
+	// inside the 71.6 minute wrap of the microsecond counter it works from.
+	static const u32 RTC_TICK_CYCLES = 1000000;
+	u32 rtcTickCountdown;
+
 	// Buttons pressed by the user right now.
 	bool buttonWP;
 	bool buttonSwap8;

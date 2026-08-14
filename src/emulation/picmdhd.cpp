@@ -338,6 +338,7 @@ void PiCMDHD::Initialise()
 	virtualButtonCountdown = 0;
 	virtualButtonMask = 0;
 	fastSerialDirection = FAST_SERIAL_DIR_IN;
+	rtcTickCountdown = RTC_TICK_CYCLES;
 
 	memset(ram, 0, sizeof(ram));
 	memset(&scsi, 0, sizeof(scsi));
@@ -877,6 +878,17 @@ void PiCMDHD::Update()
 		// DATA is sent to CB2, SRQ is sent to CB1.
 		via10.InputCB2(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
 		via10.InputCB1(IEC_Bus::GetPI_SRQ());
+	}
+
+	// Keep the clock moving even if nobody reads it. The RTC works out how much
+	// time has passed from the 32 bit microsecond counter, which wraps every
+	// 71.6 minutes, and it only did that arithmetic when the CPU touched its
+	// registers - so a guest that left the clock alone for longer than one wrap
+	// lost whole wraps. Ticking it here costs a decrement per cycle.
+	if (--rtcTickCountdown == 0)
+	{
+		rtcTickCountdown = RTC_TICK_CYCLES;
+		rtc.Tick();
 	}
 
 	// Installation mode holds SWAP8+SWAP9 virtually for a while after reset.

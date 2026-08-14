@@ -130,11 +130,16 @@ void IEC_Bus::ReadBrowseMode(void)
 // than XORing them (like the 1541).
 void IEC_Bus::ReadEmulationModeCMDHD(void)
 {
-	bool AtnaDataSetToOutOld = AtnaDataSetToOut;
-	IOPort* portB = 0;
 	gplev0 = read32(ARM_GPIO_GPLEV0);
 
-	portB = port;
+	IOPort* portB = port;
+
+	// Nearly every line below dereferences these, and the one null check that
+	// was here covered a single case out of five. Both are set together before
+	// emulation starts, so this only matters to a future caller that gets the
+	// order wrong - but then it matters as a hang, not a wrong bus level.
+	if (!portB || !VIA)
+		return;
 
 #ifndef REAL_XOR
 	// ATN is an input unless the drive itself is driving it (pb6), in which
@@ -167,7 +172,7 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 		}
 	}
 
-	if (portB && (portB->GetDirection() & 0x10) == 0)
+	if ((portB->GetDirection() & 0x10) == 0)
 		AtnaDataSetToOut = false; // If the ATNA PB4 gets set to an input then we can't be pulling data low. (Maniac Mansion does this)
 
 	// moved from PortB_OnPortOut

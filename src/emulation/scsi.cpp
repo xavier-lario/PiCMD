@@ -35,7 +35,6 @@
 u8* ScsiImage::cachePool = 0;
 ScsiImage::CacheSlot* ScsiImage::cacheSlots = 0;
 u32 ScsiImage::numCacheSlots = 0;
-u8 ScsiImage::nextImageId = 0;
 
 void ScsiImage::InitCache(u32 sizeInBytes)
 {
@@ -103,7 +102,24 @@ bool ScsiImage::Attach(const char* filename, bool readOnly)
 	name[sizeof(name) - 1] = 0;
 	attached = true;
 	needSync = false;
-	imageId = nextImageId++;
+	// Take the lowest id no attached image is using, rather than counting up
+	// forever: the id is only 8 bits and it picks cache slots, so once it wraps
+	// two live images would answer to the same one and read each other's
+	// chunks - or get flushed through the wrong file handle. At most
+	// SCSI_MAX_DISKS are ever attached, so a free id always exists.
+	imageId = 0;
+	for (u32 i = 0; i < numAttachedImages; )
+	{
+		if (attachedImages[i]->imageId == imageId)
+		{
+			imageId++;
+			i = 0;		// start over; the new id may collide with an earlier one
+		}
+		else
+		{
+			i++;
+		}
+	}
 	if (numAttachedImages < 64)
 		attachedImages[numAttachedImages++] = this;
 
@@ -209,9 +225,13 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	{
 		dirtyEvictions++;
 		ScsiImage* owner = ImageById(victim->image);
-		if (owner)
-			owner->FlushChunk(*victim);
-		victim->dirtyMask = 0;
+		if (!owner || owner->FlushChunk(*victim) != 0)
+		{
+			// The card would not take it. Leave the chunk dirty so a later
+			// flush can try again and hand the caller nothing, which sends it
+			// straight to the file - losing the sectors here would be silent.
+			return 0;
+		}
 	}
 
 	victim->valid = 0;
@@ -301,7 +321,8 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 	CacheSlot* slot = FindSlot(chunkIndex, true);
 	if (!slot)
 	{
-		// No cache; read straight through.
+		// No cache, or the set was full of chunks the card would not take.
+		// Either way, read straight through.
 		UINT bytesRead = 0;
 		u32 t0 = read32(ARM_SYSTIMER_CLO);
 		if (f_lseek(&file, (u64)lba << 9) != FR_OK)
@@ -445,7 +466,11 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 		u64 offset = ((u64)slot.chunkIndex << CACHE_CHUNK_SHIFT) + (u64)s * SECTOR_SIZE;
 		if (f_lseek(&file, offset) != FR_OK)
 			return -1;
-		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK)
+		// A short write is not an error as far as FatFS is concerned - a full
+		// card returns FR_OK having written less than asked. Treat it as one,
+		// or the caller clears dirtyMask on sectors that never reached the SD.
+		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK
+			|| written != run * SECTOR_SIZE)
 			return -1;
 		NoteStall(t0);
 		s += run;
@@ -760,7 +785,11 @@ void scsi_process_ack(scsi_context_t* context)
 		{
 			context->io = 0;
 			context->cd = 0;
-			context->data_buf[context->seq] = data;
+			// seq is the index, and it is bumped past the end deliberately to
+			// mark a full buffer - and REASSIGN BLOCKS below parks it there
+			// outright - so it has to be checked before it is used, not after.
+			if (context->seq < sizeof(context->data_buf))
+				context->data_buf[context->seq] = data;
 			context->seq++;
 			if (context->seq >= context->data_max)
 			{
@@ -829,9 +858,9 @@ void scsi_process_ack(scsi_context_t* context)
 							(context->data_buf[1] << 16) |
 							(context->data_buf[2] << 8) |
 							(context->data_buf[3])) + 4;
-						if (context->seq > 512)
+						if (context->seq >= sizeof(context->data_buf))
 						{
-							context->seq = 512;
+							context->seq = sizeof(context->data_buf) - 1;
 						}
 					}
 					else
@@ -1270,15 +1299,11 @@ void scsi_process_ack(scsi_context_t* context)
 	}
 
 out:
-	// Flush FatFS metadata whenever we return to the status phase after writes.
-	if (context->state == SCSI_STATE_BUSFREE)
-	{
-		for (int d = 0; d < SCSI_MAX_DISKS; ++d)
-		{
-			if (context->file[d])
-				context->file[d]->Sync();
-		}
-	}
+	// Nothing is flushed here on purpose. This used to sweep every image on the
+	// way back to BUSFREE, which is precisely when the computer polls us for
+	// status - see the note on ScsiImage::Sync. The sweep had in fact been dead
+	// for a while, because Sync() without force returns immediately; it is gone
+	// now so the next reader is not misled into thinking writes land here.
 	return;
 }
 

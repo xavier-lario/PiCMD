@@ -44,7 +44,14 @@ public:
 	static const u32 CACHE_CHUNK_SIZE = 1 << CACHE_CHUNK_SHIFT;
 	static const u32 SECTORS_PER_CHUNK = CACHE_CHUNK_SIZE / SECTOR_SIZE;
 
-	ScsiImage() : attached(false), sizeInSectors(0), readOnly(false) {}
+	// Everything, not just the three that used to be here: the images live in a
+	// global today so .bss covers the rest, but an ScsiImage anywhere else
+	// would start with a garbage imageId and match other images' cache slots.
+	ScsiImage()
+		: attached(false), sizeInSectors(0), readOnly(false), needSync(false), imageId(0)
+	{
+		name[0] = 0;
+	}
 
 	bool Attach(const char* filename, bool readOnly);
 	void Detach();
@@ -137,7 +144,6 @@ private:
 	static u8* cachePool;
 	static CacheSlot* cacheSlots;
 	static u32 numCacheSlots;
-	static u8 nextImageId;
 
 	u8 imageId;
 

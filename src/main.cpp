@@ -1137,12 +1137,14 @@ void emulator()
 
 			inputMappings->WaitForClearButtons();
 
-#if not defined(EXPERIMENTALZERO)
-			core0RefreshingScreen.Release();
-#endif
+			// No Release here. This core never acquired core0RefreshingScreen
+			// on the way into emulation, and SpinLock::Release just stores zero
+			// without checking ownership - so releasing it here handed the lock
+			// away while core 0 was still inside a refresh, putting both cores
+			// in the framebuffer and, worse, in the middle of the same I2C
+			// transaction to the LCD.
 		}
 	}
-	delete fileBrowser;
 }
 
 //static void MouseHandler(unsigned nButtons,
@@ -1371,7 +1373,15 @@ static void CheckOptions()
 
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
-	ScsiImage::InitCache(options.GetCMDHDCacheMB() * 1024 * 1024);
+	// Clamp before converting to bytes: the multiply is 32 bit, so 4096 lands on
+	// exactly 2^32 and comes out as zero - which InitCache would round up to its
+	// 16 slot floor and leave a 64KB cache, the worst possible outcome for a
+	// setting someone raised on purpose. Anything above the cap cannot fit under
+	// the heap ceiling anyway, and InitCache halves its way down from there.
+	u32 cacheMB = options.GetCMDHDCacheMB();
+	if (cacheMB > 512)
+		cacheMB = 512;
+	ScsiImage::InitCache(cacheMB * 1024 * 1024);
 	EMMCBlockingWaitHook = ServiceIECWhileCardBusy;
 
 #if not defined(EXPERIMENTALZERO)
