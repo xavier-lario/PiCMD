@@ -632,6 +632,7 @@ void PiCMDHD::Eject()
 	// with us by now, so the card can take as long as it likes. Done before
 	// the Detach loop only so a failure here cannot leave an image attached.
 	ScsiImage::DumpAccessLog("PICMD-LBA");
+	ScsiImage::DumpWriteLog("PICMD-WR");
 
 	for (int i = 0; i < SCSI_MAX_DISKS; i++)
 	{

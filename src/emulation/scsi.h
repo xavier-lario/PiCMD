@@ -119,6 +119,11 @@ public:
 	static u32 MaxLbaWritten() { return maxLbaWritten; }
 	static bool DumpAccessLog(const char* prefix);
 
+	// The addresses turned out not to be enough: the data lands in the right
+	// sectors and the file still comes out half its length, so what matters
+	// now is the bytes. Keeps the whole 512 byte payload of the last writes.
+	static bool DumpWriteLog(const char* prefix);
+
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
 	// cannot answer ATN.
@@ -173,6 +178,14 @@ private:
 	static u32 accessLogCount;		// total accesses, not entries held
 	static u32 maxLbaWritten;
 	void LogAccess(u32 lba, u8 op, u8 result);
+
+	// 256 payloads of 512 bytes is 128KB, and covers every write a whole file
+	// copy makes with room over.
+	static const u32 WRITE_LOG_ENTRIES = 256;
+	static u8 writeLogData[WRITE_LOG_ENTRIES][SECTOR_SIZE];
+	static u32 writeLogLba[WRITE_LOG_ENTRIES];
+	static u32 writeLogSeq[WRITE_LOG_ENTRIES];	// index into the access log
+	static u32 writeLogCount;
 
 	char name[256];
 

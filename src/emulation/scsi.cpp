@@ -283,6 +283,7 @@ void ScsiImage::ResetCounters()
 	dirtyChunkPartialFills = 0;
 	accessLogCount = 0;
 	maxLbaWritten = 0;
+	writeLogCount = 0;
 }
 
 u32 ScsiImage::pinnedChunks = 0;
@@ -387,6 +388,71 @@ u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatil
 	DEBUG_LOG("SCSI: preloaded %u of %u chunks (%u KB pinned)\r\n",
 		loaded, chunks, (chunks * CACHE_CHUNK_SIZE) >> 10);
 	return loaded;
+}
+
+u8 ScsiImage::writeLogData[ScsiImage::WRITE_LOG_ENTRIES][ScsiImage::SECTOR_SIZE];
+u32 ScsiImage::writeLogLba[ScsiImage::WRITE_LOG_ENTRIES];
+u32 ScsiImage::writeLogSeq[ScsiImage::WRITE_LOG_ENTRIES];
+u32 ScsiImage::writeLogCount = 0;
+
+// Every write as it was handed to us, payload and all. Dumped on eject next to
+// the address log, so the two can be lined up by sequence number.
+bool ScsiImage::DumpWriteLog(const char* prefix)
+{
+	if (writeLogCount == 0)
+		return false;
+
+	char filename[64];
+	FILINFO fno;
+	unsigned serial = 0;
+	for (;; ++serial)
+	{
+		if (serial > 99)
+			return false;
+		snprintf(filename, sizeof(filename), "%s%02u.LOG", prefix, serial);
+		if (f_stat(filename, &fno) != FR_OK)
+			break;
+	}
+
+	FIL fp;
+	if (f_open(&fp, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+		return false;
+
+	char line[160];
+	UINT written;
+	bool wrapped = writeLogCount > WRITE_LOG_ENTRIES;
+	u32 held = wrapped ? WRITE_LOG_ENTRIES : writeLogCount;
+	u32 first = wrapped ? writeLogCount - WRITE_LOG_ENTRIES : 0;
+
+	int n = snprintf(line, sizeof(line), "# %u writes, %u held%s\r\n",
+		writeLogCount, held, wrapped ? " (wrapped, oldest lost)" : "");
+	f_write(&fp, line, n, &written);
+
+	for (u32 i = 0; i < held; ++i)
+	{
+		u32 slot = (first + i) % WRITE_LOG_ENTRIES;
+		n = snprintf(line, sizeof(line), "W %u lba %u\r\n",
+			writeLogSeq[slot], writeLogLba[slot]);
+		if (f_write(&fp, line, n, &written) != FR_OK)
+			break;
+
+		const u8* d = writeLogData[slot];
+		for (u32 off = 0; off < SECTOR_SIZE; off += 32)
+		{
+			n = snprintf(line, sizeof(line), "%03x:", off);
+			for (u32 j = 0; j < 32; ++j)
+				n += snprintf(line + n, sizeof(line) - n, "%02x", d[off + j]);
+			n += snprintf(line + n, sizeof(line) - n, "\r\n");
+			if (f_write(&fp, line, n, &written) != FR_OK)
+			{
+				f_close(&fp);
+				return false;
+			}
+		}
+	}
+
+	f_close(&fp);
+	return true;
 }
 
 void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
@@ -650,6 +716,16 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 	}
 
 	LogAccess(lba, 'W', 0);
+
+	// Keep the payload too. accessLogCount has just been bumped past this
+	// access, so seq-1 is the entry in the address log that matches.
+	{
+		u32 slot = writeLogCount % WRITE_LOG_ENTRIES;
+		memcpy(writeLogData[slot], buffer, SECTOR_SIZE);
+		writeLogLba[slot] = lba;
+		writeLogSeq[slot] = accessLogCount - 1;
+		writeLogCount++;
+	}
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
