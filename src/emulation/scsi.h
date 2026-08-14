@@ -117,7 +117,7 @@ public:
 	// drive.
 	static u32 AccessLogCount() { return accessLogCount; }
 	static u32 MaxLbaWritten() { return maxLbaWritten; }
-	static bool DumpAccessLog(const char* filename);
+	static bool DumpAccessLog(const char* prefix);
 
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU

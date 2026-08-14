@@ -283,10 +283,26 @@ void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
 
 // Write the log out as text. Only ever called from eject, when the bus is
 // already done with us and a slow card costs nothing.
-bool ScsiImage::DumpAccessLog(const char* filename)
+//
+// The name gets a two digit serial because eject is also how you get back to
+// the file browser: going back in to look at the result of a run and coming
+// out again would otherwise overwrite the run you wanted to keep.
+bool ScsiImage::DumpAccessLog(const char* prefix)
 {
 	if (accessLogCount == 0)
 		return false;
+
+	char filename[64];
+	FILINFO fno;
+	unsigned serial = 0;
+	for (;; ++serial)
+	{
+		if (serial > 99)
+			return false;		// 100 runs without emptying the card; give up
+		snprintf(filename, sizeof(filename), "%s%02u.LOG", prefix, serial);
+		if (f_stat(filename, &fno) != FR_OK)
+			break;				// free name
+	}
 
 	FIL fp;
 	if (f_open(&fp, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
