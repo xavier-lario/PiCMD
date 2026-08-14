@@ -1253,6 +1253,8 @@ void DisplayOptions(int y_pos)
 	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
 	snprintf(tempBuffer, tempBufferSize, "LcdLogoName = %s\r\n", options.GetLcdLogoName());
 	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+	snprintf(tempBuffer, tempBufferSize, "CMDHDCacheMB = %d\r\n", options.GetCMDHDCacheMB());
+	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
 #endif
 }
 
@@ -1358,6 +1360,25 @@ static void CheckOptions()
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
 	ScsiImage::InitCache(options.GetCMDHDCacheMB() * 1024 * 1024);
 	EMMCBlockingWaitHook = ServiceIECWhileCardBusy;
+
+#if not defined(EXPERIMENTALZERO)
+	// Say how much cache was actually obtained. DEBUG_LOG is compiled out of a
+	// release build, so this used to be invisible - and no cache at all means
+	// every sector access stalls the drive on the card.
+	{
+		u32 cacheKB = ScsiImage::CacheSizeKB();
+		if (cacheKB == 0)
+		{
+			snprintf(tempBuffer, tempBufferSize, "WARNING: no CMD HD disk cache (allocation failed)");
+			screen.PrintText(false, 0, heightScreen - 32, tempBuffer, COLOUR_WHITE, COLOUR_RED);
+		}
+		else if (options.ShowOptions())
+		{
+			snprintf(tempBuffer, tempBufferSize, "CMD HD disk cache = %u KB", cacheKB);
+			screen.PrintText(false, 0, heightScreen - 32, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+		}
+	}
+#endif
 
 	inputMappings->INPUT_BUTTON_ENTER = options.GetButtonEnter();
 	inputMappings->INPUT_BUTTON_UP = options.GetButtonUp();

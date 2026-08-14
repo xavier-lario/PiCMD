@@ -42,23 +42,38 @@ void ScsiImage::InitCache(u32 sizeInBytes)
 	if (cachePool)
 		return;
 
-	numCacheSlots = sizeInBytes >> CACHE_CHUNK_SHIFT;
-	if (numCacheSlots < 16)
-		numCacheSlots = 16;
+	u32 slots = sizeInBytes >> CACHE_CHUNK_SHIFT;
+	if (slots < 16)
+		slots = 16;
 
-	cachePool = (u8*)malloc(numCacheSlots * CACHE_CHUNK_SIZE);
-	cacheSlots = (CacheSlot*)malloc(numCacheSlots * sizeof(CacheSlot));
-
-	if (!cachePool || !cacheSlots)
+	// Settle for a smaller cache rather than none: with numCacheSlots at zero
+	// every single access goes to the card synchronously, which is exactly the
+	// stall the cache exists to avoid.
+	for (;;)
 	{
-		DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", numCacheSlots * CACHE_CHUNK_SIZE);
+		cachePool = (u8*)malloc(slots * CACHE_CHUNK_SIZE);
+		cacheSlots = (CacheSlot*)malloc(slots * sizeof(CacheSlot));
+		if (cachePool && cacheSlots)
+			break;
+
 		free(cachePool);
 		free(cacheSlots);
 		cachePool = 0;
 		cacheSlots = 0;
-		numCacheSlots = 0;
-		return;
+
+		if (slots <= 16)
+		{
+			DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", slots * CACHE_CHUNK_SIZE);
+			numCacheSlots = 0;
+			return;
+		}
+
+		slots >>= 1;
+		if (slots < 16)
+			slots = 16;
 	}
+
+	numCacheSlots = slots;
 
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
@@ -168,8 +183,19 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!allocate)
 		return 0;
 
-	// Prefer replacing an invalid slot.
-	CacheSlot* victim = slot->valid ? (slot2->valid ? slot : slot2) : slot;
+	// Prefer an unused slot, then a clean one. Evicting a dirty chunk means a
+	// synchronous write to the card from whatever called us - including
+	// WriteSector, which must not go near it while the computer is polling for
+	// status. Only pick a dirty victim when the whole set is dirty.
+	CacheSlot* victim;
+	if (!slot->valid)
+		victim = slot;
+	else if (!slot2->valid)
+		victim = slot2;
+	else if (!slot->dirtyMask)
+		victim = slot;
+	else
+		victim = slot2;
 
 	// Never drop writes on the floor. The chunk being evicted may belong to
 	// another image, so flush it through whoever owns it.
@@ -328,11 +354,14 @@ int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 	}
 
 	// If the sector happens to be cached, take it from there - but never fill
-	// the cache on its account.
+	// the cache on its account. A slot being valid only says the chunk is
+	// allocated: a write leaves the other seven sectors of it holding whatever
+	// was there before, so the per sector bit has to be checked as well.
+	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
 	CacheSlot* slot = FindSlot(lba / SECTORS_PER_CHUNK, false);
-	if (slot && slot->valid)
+	if (slot && slot->valid && (slot->validMask & (1 << sectorInChunk)))
 	{
-		memcpy(buffer, slot->data + (lba % SECTORS_PER_CHUNK) * SECTOR_SIZE, SECTOR_SIZE);
+		memcpy(buffer, slot->data + sectorInChunk * SECTOR_SIZE, SECTOR_SIZE);
 		return 0;
 	}
 

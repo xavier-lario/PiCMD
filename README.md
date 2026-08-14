@@ -214,8 +214,11 @@ quick from then on.
 // Only works once the image HAS a stored number - see "Device numbers" below.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image (default 32)
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image (default 128).
+// Big enough to hold the whole image means dirty chunks are never evicted
+// mid-transfer, which is what keeps writes off the card. If the allocation
+// fails the size is halved until it fits.
+//CMDHDCacheMB = 128
 
 // GPIO used to pull the IEC ATN line low (0 = off, 24 on a Pi1541io).
 // Needed only so the SWAP buttons can reprogram another drive - see

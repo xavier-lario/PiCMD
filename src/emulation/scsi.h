@@ -83,6 +83,9 @@ public:
 
 	// The (global) cache used by all images.
 	static void InitCache(u32 sizeInBytes);
+	// How much cache was actually obtained. Zero means every access goes
+	// straight to the card, so it is worth showing at boot.
+	static u32 CacheSizeKB() { return (numCacheSlots * CACHE_CHUNK_SIZE) >> 10; }
 
 private:
 	FIL file;
