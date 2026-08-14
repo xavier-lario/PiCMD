@@ -86,6 +86,28 @@ public:
 	static u32 DirtyEvictions() { return dirtyEvictions; }
 	static void ResetDirtyEvictions() { dirtyEvictions = 0; }
 
+	// Read instrumentation, for telling a cache coherency fault from a plain
+	// slow card. Only ReadSector is counted; the whole disk scan deliberately
+	// goes round the cache and would swamp the numbers.
+	//
+	// cacheReadHits   - answered from a slot without touching the card.
+	// cacheReadMisses - had to go to the file.
+	// dirtyChunkReads - landed on a chunk still holding unflushed writes.
+	// dirtyChunkPartialFills - the subset of those that also had to pull a
+	//   sector off the card into that same chunk. This is the only path in the
+	//   cache that mixes what the card holds with writes that have not reached
+	//   it, so if a stale block is ever handed back this is where it comes
+	//   from. Zero here rules the cache out the way dirtyEvictions did.
+	static u32 CacheReadHits() { return cacheReadHits; }
+	static u32 CacheReadMisses() { return cacheReadMisses; }
+	static u32 DirtyChunkReads() { return dirtyChunkReads; }
+	static u32 DirtyChunkPartialFills() { return dirtyChunkPartialFills; }
+
+	// Zero every counter above, plus the stall watermark. Called on mount so
+	// the figures describe what the computer went on to do rather than the
+	// whole disk scan that precedes it.
+	static void ResetCounters();
+
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
 	// cannot answer ATN.
@@ -111,6 +133,10 @@ private:
 	static u32 worstStallMicros;
 	static u32 accessCounter;
 	static u32 dirtyEvictions;
+	static u32 cacheReadHits;
+	static u32 cacheReadMisses;
+	static u32 dirtyChunkReads;
+	static u32 dirtyChunkPartialFills;
 
 	char name[256];
 

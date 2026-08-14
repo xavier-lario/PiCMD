@@ -247,6 +247,20 @@ u32 ScsiImage::numAttachedImages = 0;
 u32 ScsiImage::worstStallMicros = 0;
 u32 ScsiImage::accessCounter = 0;
 u32 ScsiImage::dirtyEvictions = 0;
+u32 ScsiImage::cacheReadHits = 0;
+u32 ScsiImage::cacheReadMisses = 0;
+u32 ScsiImage::dirtyChunkReads = 0;
+u32 ScsiImage::dirtyChunkPartialFills = 0;
+
+void ScsiImage::ResetCounters()
+{
+	worstStallMicros = 0;
+	dirtyEvictions = 0;
+	cacheReadHits = 0;
+	cacheReadMisses = 0;
+	dirtyChunkReads = 0;
+	dirtyChunkPartialFills = 0;
+}
 
 void ScsiImage::FlushIdle()
 {
@@ -323,6 +337,7 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 	{
 		// No cache, or the set was full of chunks the card would not take.
 		// Either way, read straight through.
+		cacheReadMisses++;
 		UINT bytesRead = 0;
 		u32 t0 = read32(ARM_SYSTIMER_CLO);
 		if (f_lseek(&file, (u64)lba << 9) != FR_OK)
@@ -335,8 +350,18 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 		return 0;
 	}
 
-	if (!(slot->validMask & bit))
+	// Sampled before anything below can clear it. Note FillChunk only ever runs
+	// with dirtyMask already zero, so it cannot race this.
+	if (slot->dirtyMask)
+		dirtyChunkReads++;
+
+	if (slot->validMask & bit)
 	{
+		cacheReadHits++;
+	}
+	else
+	{
+		cacheReadMisses++;
 		if (slot->dirtyMask == 0)
 		{
 			// Nothing to lose, so pull the whole chunk in and keep the
@@ -351,6 +376,7 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 		{
 			// Part of this chunk is written but not yet on the card, so a
 			// whole-chunk read would clobber it. Fetch just this sector.
+			dirtyChunkPartialFills++;
 			UINT bytesRead = 0;
 			u32 t0 = read32(ARM_SYSTIMER_CLO);
 			if (f_lseek(&file, (u64)lba << 9) != FR_OK)

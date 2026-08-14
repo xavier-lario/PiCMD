@@ -747,6 +747,35 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 64, tempBuffer, textColour, bgColour);
 			}
 
+			// How the cache is being used at all. Misses are what the card
+			// sees; hits cost nothing.
+			static u32 oldCacheReads = 0xffffffff;
+			u32 cacheHits = ScsiImage::CacheReadHits();
+			u32 cacheMisses = ScsiImage::CacheReadMisses();
+			if (cacheHits + cacheMisses != oldCacheReads)
+			{
+				oldCacheReads = cacheHits + cacheMisses;
+				snprintf(tempBuffer, tempBufferSize, "cache rd hit %u miss %u   ",
+					cacheHits, cacheMisses);
+				screen.PrintText(false, 0, y - 80, tempBuffer, textColour, bgColour);
+			}
+
+			// Reads that landed on a chunk still holding unflushed writes, and
+			// the ones that also had to fetch a sector off the card into that
+			// same chunk. The second number is the one that matters: it is the
+			// only place the cache mixes what the card holds with writes that
+			// have not reached it.
+			static u32 oldDirtyChunkReads = 0xffffffff;
+			u32 dirtyChunkReads = ScsiImage::DirtyChunkReads();
+			u32 dirtyPartial = ScsiImage::DirtyChunkPartialFills();
+			if (dirtyChunkReads != oldDirtyChunkReads)
+			{
+				oldDirtyChunkReads = dirtyChunkReads;
+				snprintf(tempBuffer, tempBufferSize, "dirty-chunk rd %u partial %u   ",
+					dirtyChunkReads, dirtyPartial);
+				screen.PrintText(false, 0, y - 96, tempBuffer, textColour, bgColour);
+			}
+
 			static u32 oldScanPercent = 0xffffffff;
 			if (piCMDHD.IsScanning())
 			{

@@ -572,6 +572,12 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 	scanNeeded = true;
 	FindBaseLBA();
 
+	// The scan above walks the whole image off the card, so it sets the stall
+	// watermark and the read counters before the computer has asked for
+	// anything. Start the figures here, or they describe the mount instead of
+	// whatever goes wrong afterwards.
+	ScsiImage::ResetCounters();
+
 	// look to see if there are more files with the same base name, but
 	// s<ID><LUN> extensions: s01, ..., s10, ..., s67 (VICE convention)
 	int len = (int)strlen(filename);
