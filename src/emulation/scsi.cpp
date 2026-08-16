@@ -522,18 +522,33 @@ bool ScsiImage::DumpAccessLog(const char* prefix)
 	return true;
 }
 
-void ScsiImage::FlushIdle()
+void ScsiImage::FlushIdle(bool (*abort)())
 {
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
 		ScsiImage* img = attachedImages[i];
 		if (img && img->attached && img->needSync)
 		{
-			img->FlushAllDirty();
+			// Stop the moment the bus wants us again rather than finishing the
+			// backlog regardless. f_sync only once there is nothing left, or it
+			// would be paying for metadata on every partial drain.
+			if (!img->FlushAllDirty(abort))
+				return;
 			f_sync(&img->file);
 			img->needSync = false;
 		}
 	}
+}
+
+u32 ScsiImage::DirtyChunkCount()
+{
+	u32 n = 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask)
+			n++;
+	}
+	return n;
 }
 
 ScsiImage* ScsiImage::ImageById(u8 id)
@@ -796,13 +811,19 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	return 0;
 }
 
-void ScsiImage::FlushAllDirty()
+bool ScsiImage::FlushAllDirty(bool (*abort)())
 {
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
-		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
-			FlushChunk(cacheSlots[i]);
+		if (!(cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId))
+			continue;
+		// Asked before committing to the write, not after: once FlushChunk is
+		// under way the CPU is frozen for as long as the card takes.
+		if (abort && abort())
+			return false;
+		FlushChunk(cacheSlots[i]);
 	}
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

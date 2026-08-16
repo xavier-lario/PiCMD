@@ -412,9 +412,9 @@ static void UpdateLCDLamps(void)
 	if (rows == 0)
 		return;
 
-	bool on[6];
-	const char* wide[6];
-	const char* narrow[6];
+	bool on[7];
+	const char* wide[7];
+	const char* narrow[7];
 
 	on[0] = true;								// POWER - the drive is running
 	on[1] = piCMDHD.IsActivityLEDOn();
@@ -422,6 +422,7 @@ static void UpdateLCDLamps(void)
 	on[3] = piCMDHD.IsWriteProtectLEDOn();
 	on[4] = piCMDHD.IsSwap8LEDOn();
 	on[5] = piCMDHD.IsSwap9LEDOn();
+	on[6] = piCMDHD.IsGeosLEDOn();
 
 	wide[0] = "POWER";   narrow[0] = "PWR";
 	wide[1] = "ACTIVE";  narrow[1] = "ACT";
@@ -429,6 +430,12 @@ static void UpdateLCDLamps(void)
 	wide[3] = "WR PROT"; narrow[3] = "WP";
 	wide[4] = "DRIVE 8"; narrow[4] = "D8";
 	wide[5] = "DRIVE 9"; narrow[5] = "D9";
+	wide[6] = "GEOS";    narrow[6] = "GEO";
+
+	// The GEOS lamp is the seventh, and the wide layout puts two per row - so
+	// it needs a fourth row, which a four row display cannot spare without
+	// losing the track line underneath. Show it there only when there is room.
+	int numLamps = 7;
 
 	core0RefreshingScreen.Acquire();
 	IEC_Bus::WaitMicroSeconds(100);
@@ -437,8 +444,10 @@ static void UpdateLCDLamps(void)
 	if (rows >= 4)
 	{
 		// 16 characters across, so two lamps per row in eight column fields
-		lampRows = 3;
-		for (int i = 0; i < 6; ++i)
+		if (rows < 5)
+			numLamps = 6;
+		lampRows = (numLamps + 1) / 2;
+		for (int i = 0; i < numLamps; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-8s", wide[i]);
 			screenLCD->PrintText(false, (i & 1) ? 8 * 8 : 0, (i >> 1) * fontHeight,
@@ -447,9 +456,9 @@ static void UpdateLCDLamps(void)
 	}
 	else
 	{
-		// Only room for a couple of rows: four short tags each
+		// Only room for a couple of rows: four short tags each, so seven fit
 		lampRows = 2;
-		for (int i = 0; i < 6; ++i)
+		for (int i = 0; i < numLamps; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
 			screenLCD->PrintText(false, (i % 4) * 4 * 8, (i / 4) * fontHeight,
@@ -464,6 +473,14 @@ static void UpdateLCDLamps(void)
 	IEC_Bus::WaitMicroSeconds(100);
 	core0RefreshingScreen.Release();
 #endif
+}
+
+// Asked between chunks while the idle flush drains the write-back cache. The
+// bus waking up outranks finishing the backlog: whatever is left stays dirty
+// and goes out at the next quiet moment.
+static bool BusWantsTheDrive()
+{
+	return IEC_Bus::IsAtnAsserted();
 }
 
 // This runs on core0 and frees up core1 to just run the emulator.
@@ -789,6 +806,18 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
 			}
 
+			// Chunks written but not yet on the card - what pulling the power
+			// would throw away. It drains on its own once the bus goes quiet;
+			// ejecting forces it out.
+			static u32 oldDirtyChunks = 0xffffffff;
+			u32 dirtyChunks = ScsiImage::DirtyChunkCount();
+			if (dirtyChunks != oldDirtyChunks)
+			{
+				oldDirtyChunks = dirtyChunks;
+				snprintf(tempBuffer, tempBufferSize, "unwritten %u KB   ", dirtyChunks * 4);
+				screen.PrintText(false, 0, y - 128, tempBuffer, textColour, bgColour);
+			}
+
 			static u32 oldScanPercent = 0xffffffff;
 			if (piCMDHD.IsScanning())
 			{
@@ -1002,7 +1031,11 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
 			{
 				quietLoops = 0;
-				ScsiImage::FlushIdle();
+				// Drain as much of the backlog as the quiet lasts. Without the
+				// abort this went at everything in one go, which after a big
+				// write is thousands of sectors with the CPU frozen - and the
+				// drive is gone for all of it if the computer comes back.
+				ScsiImage::FlushIdle(BusWantsTheDrive);
 			}
 		}
 
