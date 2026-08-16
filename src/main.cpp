@@ -424,18 +424,15 @@ static void UpdateLCDLamps(void)
 	on[5] = piCMDHD.IsSwap9LEDOn();
 	on[6] = piCMDHD.IsGeosLEDOn();
 
-	wide[0] = "POWER";   narrow[0] = "PWR";
-	wide[1] = "ACTIVE";  narrow[1] = "ACT";
-	wide[2] = "ERROR";   narrow[2] = "ERR";
-	wide[3] = "WR PROT"; narrow[3] = "WP";
-	wide[4] = "DRIVE 8"; narrow[4] = "D8";
-	wide[5] = "DRIVE 9"; narrow[5] = "D9";
-	wide[6] = "GEOS";    narrow[6] = "GEO";
+	wide[0] = "POWER"; narrow[0] = "PWR";
+	wide[1] = "ACTIV"; narrow[1] = "ACT";
+	wide[2] = "ERROR"; narrow[2] = "ERR";
+	wide[3] = "WPROT"; narrow[3] = "WP";
+	wide[4] = "DRV 8"; narrow[4] = "D8";
+	wide[5] = "DRV 9"; narrow[5] = "D9";
+	wide[6] = "GEOS";  narrow[6] = "GEO";
 
-	// The GEOS lamp is the seventh, and the wide layout puts two per row - so
-	// it needs a fourth row, which a four row display cannot spare without
-	// losing the track line underneath. Show it there only when there is room.
-	int numLamps = 7;
+	const int numLamps = 7;
 
 	core0RefreshingScreen.Acquire();
 	IEC_Bus::WaitMicroSeconds(100);
@@ -443,14 +440,15 @@ static void UpdateLCDLamps(void)
 	u32 lampRows;
 	if (rows >= 4)
 	{
-		// 16 characters across, so two lamps per row in eight column fields
-		if (rows < 5)
-			numLamps = 6;
-		lampRows = (numLamps + 1) / 2;
+		// 16 characters across: three lamps per row in five column fields. Two
+		// per row read better, but seven lamps then need a fourth row, and on a
+		// four row display that is the status line underneath - which is worth
+		// more than the extra character each label would gain.
+		lampRows = 3;
 		for (int i = 0; i < numLamps; ++i)
 		{
-			snprintf(tempBuffer, tempBufferSize, "%-8s", wide[i]);
-			screenLCD->PrintText(false, (i & 1) ? 8 * 8 : 0, (i >> 1) * fontHeight,
+			snprintf(tempBuffer, tempBufferSize, "%-5s", wide[i]);
+			screenLCD->PrintText(false, (i % 3) * 5 * 8, (i / 3) * fontHeight,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
 	}
