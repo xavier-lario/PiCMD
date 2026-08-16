@@ -143,6 +143,15 @@ class m6522
 	};
 
 public:
+	// Fast serial diagnostics. The CMD HD carries GEOS traffic through this
+	// shift register, and bytes have been arriving with their low bits set -
+	// which is what an extra clock edge sampling the idle line looks like.
+	// srEdgesWhileFull counts edges with no room left, srShortReads counts the
+	// CPU taking the byte before eight bits are in.
+	static u32 srBytesIn;
+	static u32 srEdgesWhileFull;
+	static u32 srShortReads;
+
 /*
 FCR/PCR
 						+---+---+---+---+---+---+---+---+

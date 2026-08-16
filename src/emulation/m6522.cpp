@@ -27,6 +27,10 @@ m6522::m6522()
 	Reset();
 }
 
+u32 m6522::srBytesIn = 0;
+u32 m6522::srEdgesWhileFull = 0;
+u32 m6522::srShortReads = 0;
+
 void m6522::Reset()
 {
 	functionControlRegister = 0;
@@ -343,7 +347,18 @@ void m6522::Execute()
 					shiftRegister <<= 1;
 					shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 					if (++bitsShiftedSoFar == 8)
+					{
 						SetInterrupt(IR_SR);
+						srBytesIn++;
+					}
+				}
+				else
+				{
+					// A clock edge with a full byte still sitting in the
+					// register. On the CMD HD's fast serial that is a bit the
+					// sender meant for the next byte and we have nowhere to put
+					// - the far end and this one have lost step.
+					srEdgesWhileFull++;
 				}
 			}
 		break;
@@ -460,7 +475,10 @@ unsigned char m6522::Read(unsigned int address)
 		break;
 		case SR:
 			value = shiftRegister;
-			if (interruptFlagRegister & IR_SR) bitsShiftedSoFar = 0;
+			if (interruptFlagRegister & IR_SR)
+				bitsShiftedSoFar = 0;
+			else if (bitsShiftedSoFar)
+				srShortReads++;		// read mid byte: the rest arrives as ones
 			ClearInterrupt(IR_SR);
 		break;
 		case ACR:
