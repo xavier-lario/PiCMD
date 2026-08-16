@@ -395,6 +395,15 @@ u32 ScsiImage::writeLogLba[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogSeq[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogCount = 0;
 
+// snprintf returns what it would have written, not what it did. Handing that
+// to f_write walks off the end of the buffer.
+static UINT Clamp(int produced, size_t capacity)
+{
+	if (produced < 0)
+		return 0;
+	return (UINT)((size_t)produced < capacity ? (size_t)produced : capacity - 1);
+}
+
 // Every write as it was handed to us, payload and all. Dumped on eject next to
 // the address log, so the two can be lined up by sequence number.
 bool ScsiImage::DumpWriteLog(const char* prefix)
@@ -426,14 +435,14 @@ bool ScsiImage::DumpWriteLog(const char* prefix)
 
 	int n = snprintf(line, sizeof(line), "# %u writes, %u held%s\r\n",
 		writeLogCount, held, wrapped ? " (wrapped, oldest lost)" : "");
-	f_write(&fp, line, n, &written);
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
 
 	for (u32 i = 0; i < held; ++i)
 	{
 		u32 slot = (first + i) % WRITE_LOG_ENTRIES;
 		n = snprintf(line, sizeof(line), "W %u lba %u\r\n",
 			writeLogSeq[slot], writeLogLba[slot]);
-		if (f_write(&fp, line, n, &written) != FR_OK)
+		if (f_write(&fp, line, Clamp(n, sizeof(line)), &written) != FR_OK)
 			break;
 
 		const u8* d = writeLogData[slot];
@@ -443,7 +452,7 @@ bool ScsiImage::DumpWriteLog(const char* prefix)
 			for (u32 j = 0; j < 32; ++j)
 				n += snprintf(line + n, sizeof(line) - n, "%02x", d[off + j]);
 			n += snprintf(line + n, sizeof(line) - n, "\r\n");
-			if (f_write(&fp, line, n, &written) != FR_OK)
+			if (f_write(&fp, line, Clamp(n, sizeof(line)), &written) != FR_OK)
 			{
 				f_close(&fp);
 				return false;
@@ -500,18 +509,24 @@ bool ScsiImage::DumpAccessLog(const char* prefix)
 	u32 held = wrapped ? ACCESS_LOG_ENTRIES : accessLogCount;
 	u32 first = wrapped ? accessLogCount - ACCESS_LOG_ENTRIES : 0;
 
+	// Two lines, written separately: together they overrun a 128 byte buffer,
+	// and snprintf reports the length it wanted rather than the length it
+	// produced - so handing that straight to f_write read off the end of the
+	// array and put rubbish in the header.
 	int n = snprintf(line, sizeof(line),
-		"# seq op lba image result   (op: R cached read, W write, U uncached read)\r\n"
-		"# %u accesses, %u held%s, max lba written %u\r\n",
+		"# seq op lba image result   (op: R cached read, W write, U uncached read)\r\n");
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
+	n = snprintf(line, sizeof(line), "# %u accesses, %u held%s, max lba written %u\r\n",
 		accessLogCount, held, wrapped ? " (wrapped, oldest lost)" : "", maxLbaWritten);
-	f_write(&fp, line, n, &written);
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
 
 	for (u32 i = 0; i < held; ++i)
 	{
 		const AccessLogEntry& e = accessLog[(first + i) % ACCESS_LOG_ENTRIES];
 		n = snprintf(line, sizeof(line), "%u %c %u %u %u\r\n",
 			first + i, (char)e.op, e.lba, (unsigned)e.image, (unsigned)e.result);
-		if (f_write(&fp, line, n, &written) != FR_OK || written != (UINT)n)
+		UINT len = Clamp(n, sizeof(line));
+		if (f_write(&fp, line, len, &written) != FR_OK || written != len)
 		{
 			f_close(&fp);
 			return false;
