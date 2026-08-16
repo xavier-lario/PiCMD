@@ -30,6 +30,9 @@ m6522::m6522()
 u32 m6522::srBytesIn = 0;
 u32 m6522::srEdgesWhileFull = 0;
 u32 m6522::srShortReads = 0;
+u32 m6522::srModeMask = 0;
+u32 m6522::srShiftsIn = 0;
+u32 m6522::srShiftsOut = 0;
 
 void m6522::Reset()
 {
@@ -306,6 +309,9 @@ void m6522::Execute()
 	pb6Old = pb6;
 	t2CountingPB6ModeOld = t2CountingPB6Mode;
 
+	if (shiftMode)
+		srModeMask |= (1 << shiftMode);
+
 	switch (shiftMode)
 	{
 		default:	// 000 = shift reg disabled
@@ -317,7 +323,7 @@ void m6522::Execute()
 			{
 				// should output cb1OutputShiftClock onto cb1
 				shiftRegister <<= 1;
-				shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+				shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 			}
@@ -331,7 +337,7 @@ void m6522::Execute()
 				// should output cb1OutputShiftClock onto cb1
 				cb1OutputShiftClock = !cb1OutputShiftClock;
 				shiftRegister <<= 1;
-				shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+				shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 			}
@@ -345,7 +351,7 @@ void m6522::Execute()
 				if (!(bitsShiftedSoFar & 8))	// Shift register bug not implmented (would shift 9 bits?)
 				{
 					shiftRegister <<= 1;
-					shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+					shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 					if (++bitsShiftedSoFar == 8)
 					{
 						SetInterrupt(IR_SR);
@@ -366,7 +372,7 @@ void m6522::Execute()
 			if (shiftClockPositiveEdge)	// in this mode	the shift register counter is disabled.
 			{
 				cb2Shift = (shiftRegister & 0x80) != 0;
-				shiftRegister = (shiftRegister << 1) | cb2Shift;
+				shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 				// should output cb1OutputShiftClock onto cb1
 				// cb2Shift should output to cb2
 				//	- R/!W (on the 2nd VIA could be dangerous)
@@ -376,7 +382,7 @@ void m6522::Execute()
 			if ((t2TimedOutCount > 2) && shiftClockPositiveEdge && !(bitsShiftedSoFar & 8))
 			{
 				cb2Shift = (shiftRegister & 0x80) != 0;
-				shiftRegister = (shiftRegister << 1) | cb2Shift;
+				shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 				// should output cb1OutputShiftClock onto cb1
@@ -394,7 +400,7 @@ void m6522::Execute()
 				if (!cb1OutputShiftClock)
 				{
 					cb2Shift = (shiftRegister & 0x80) != 0;
-					shiftRegister = (shiftRegister << 1) | cb2Shift;
+					shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 					if (++bitsShiftedSoFar == 8)
 						SetInterrupt(IR_SR);
 				}
@@ -411,7 +417,7 @@ void m6522::Execute()
 					// should output cb1OutputShiftClock onto cb1
 					cb1OutputShiftClock = !cb1OutputShiftClock;
 					cb2Shift = (shiftRegister & 0x80) != 0;
-					shiftRegister = (shiftRegister << 1) | cb2Shift;
+					shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 					if (++bitsShiftedSoFar == 8)
 						SetInterrupt(IR_SR);
 					// cb2Shift should output to cb2

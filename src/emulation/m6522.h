@@ -151,6 +151,12 @@ public:
 	static u32 srBytesIn;
 	static u32 srEdgesWhileFull;
 	static u32 srShortReads;
+	// Which shift modes have ever been active (bit N = mode N), and how many
+	// bits have actually moved each way. Mode 3 alone stayed at zero, so the
+	// question is which one the CMD HD really drives.
+	static u32 srModeMask;
+	static u32 srShiftsIn;
+	static u32 srShiftsOut;
 
 /*
 FCR/PCR

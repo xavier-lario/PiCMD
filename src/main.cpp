@@ -809,11 +809,12 @@ void UpdateScreen()
 			// where to look: edges arriving with the register already full, or
 			// the CPU taking a byte early, both leave ones at the bottom.
 			static u32 oldSrBytes = 0xffffffff;
-			if (m6522::srBytesIn != oldSrBytes)
+			if (m6522::srShiftsIn + m6522::srShiftsOut + m6522::srModeMask != oldSrBytes)
 			{
-				oldSrBytes = m6522::srBytesIn;
-				snprintf(tempBuffer, tempBufferSize, "fastser %u full %u short %u   ",
-					m6522::srBytesIn, m6522::srEdgesWhileFull, m6522::srShortReads);
+				oldSrBytes = m6522::srShiftsIn + m6522::srShiftsOut + m6522::srModeMask;
+				snprintf(tempBuffer, tempBufferSize, "sr mode %02x in %u out %u full %u short %u   ",
+					m6522::srModeMask, m6522::srShiftsIn, m6522::srShiftsOut,
+					m6522::srEdgesWhileFull, m6522::srShortReads);
 				screen.PrintText(false, 0, y - 144, tempBuffer, textColour, bgColour);
 			}
 
