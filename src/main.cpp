@@ -804,18 +804,42 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
 			}
 
-			// Fast serial health. Bytes have been reaching the disk with their
-			// low bits set, and the standard serial path is clean, so this is
-			// where to look: edges arriving with the register already full, or
-			// the CPU taking a byte early, both leave ones at the bottom.
-			static u32 oldSrBytes = 0xffffffff;
-			if (m6522::srShiftsIn + m6522::srShiftsOut + m6522::srModeMask != oldSrBytes)
+			// The SCSI data bus against what the CPU actually read off it.
+			// The corrupted bytes only ever appear in sectors the drive reads,
+			// modifies and writes back itself - never in bulk data from the
+			// computer - and always as | 0x03, so this is the join to watch:
+			// bad > 0 with xor 03 is the whole bug. ddr says which way it got
+			// in - equal to xor, a direction bit left as an output; zero, the
+			// port A latch handing back an old byte.
+			static u32 oldScsiBusReads = 0xffffffff;
+			if (PiCMDHD::scsiBusReads != oldScsiBusReads)
 			{
-				oldSrBytes = m6522::srShiftsIn + m6522::srShiftsOut + m6522::srModeMask;
+				oldScsiBusReads = PiCMDHD::scsiBusReads;
+				snprintf(tempBuffer, tempBufferSize, "scsi rd %u bad %u xor %02x ddr %02x   ",
+					PiCMDHD::scsiBusReads, PiCMDHD::scsiBusMismatches,
+					PiCMDHD::scsiBusMismatchXor, PiCMDHD::scsiBusMismatchDdr);
+				screen.PrintText(false, 0, y - 160, tempBuffer, textColour, bgColour);
+
+				// Fast serial health, redrawn alongside the SCSI counter
+				// rather than when its own numbers move. These can sit at zero
+				// for an entire session, and a line that only redraws on
+				// change is indistinguishable from one that was never drawn -
+				// which is exactly how the first run read. Riding on a counter
+				// that never stops moving makes a row of zeros a result.
 				snprintf(tempBuffer, tempBufferSize, "sr mode %02x in %u out %u full %u short %u   ",
 					m6522::srModeMask, m6522::srShiftsIn, m6522::srShiftsOut,
 					m6522::srEdgesWhileFull, m6522::srShortReads);
 				screen.PrintText(false, 0, y - 144, tempBuffer, textColour, bgColour);
+
+				// Same reasoning as the shift register line above: a counter
+				// that is meant to stay at zero cannot own its own redraw, or
+				// zero and never-drawn look identical after the screen is
+				// cleared on a disk change. This one is the whole point of the
+				// run, so it rides along too.
+				snprintf(tempBuffer, tempBufferSize, "bitrot wr %u bytes %u lba %u mask %02x   ",
+					ScsiImage::BitRotWrites(), ScsiImage::BitRotBytes(),
+					ScsiImage::BitRotFirstLba(), ScsiImage::BitRotMask());
+				screen.PrintText(false, 0, y - 176, tempBuffer, textColour, bgColour);
 			}
 
 			// Chunks written but not yet on the card - what pulling the power
