@@ -63,6 +63,11 @@ enum
 #define VIA_REG_ORA    1
 #define VIA_REG_ORA_NH 15
 
+u32 PiCMDHD::scsiBusReads = 0;
+u32 PiCMDHD::scsiBusMismatches = 0;
+u8 PiCMDHD::scsiBusMismatchXor = 0;
+u8 PiCMDHD::scsiBusMismatchDdr = 0;
+
 ///////////////////////////////////////////////////////////////////////////////
 // CPU bus functions
 ///////////////////////////////////////////////////////////////////////////////
@@ -688,8 +693,24 @@ u8 PiCMDHD::Read(u16 address)
 			if (reg == VIA_REG_ORA || reg == VIA_REG_ORA_NH)
 			{
 				// Reading the SCSI data bus; PRA accesses generate ACK.
-				via9.GetPortA()->SetInput(scsi_get_bus(&scsi));
+				u8 bus = scsi_get_bus(&scsi);
+				via9.GetPortA()->SetInput(bus);
 				value = via9.Read(reg);
+				// Did the CPU get what the bus was holding? See the note on
+				// scsiBusReads in the header: a direction bit left as an
+				// output, or a stale CA1 latch, both replace bus bits here,
+				// and on an inverted bus that arrives as ones in the data.
+				if (scsi.io)
+				{
+					scsiBusReads++;
+					if (value != bus)
+					{
+						u8 differing = (u8)(value ^ bus);
+						scsiBusMismatches++;
+						scsiBusMismatchXor |= differing;
+						scsiBusMismatchDdr |= (u8)(via9.GetPortA()->GetDirection() & differing);
+					}
+				}
 				if (scsi.state != SCSI_STATE_BUSFREE && reg == VIA_REG_ORA)
 				{
 					scsi_process_ack(&scsi);

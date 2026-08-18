@@ -134,6 +134,24 @@ public:
 	// before Insert; 0 leaves the cache cold.
 	void SetPreloadMB(unsigned mb) { preloadMB = mb; }
 
+	// What the SCSI data bus offered on a port A read against what the CPU
+	// actually took away. m6522::ReadPortA returns
+	// (input & ~ddr) | (output & ddr), and the bus only ever arrives through
+	// SetInput, so any DDRA bit still set as an output silently serves the
+	// port's own stale latch in place of a real bus bit. The bus is inverted
+	// (scsi_process_ack does databus ^ 0xff), so a zero smuggled in that way
+	// reaches the sector buffer as a one - which is exactly the | 0x03 that
+	// has been eating the BAM and directory sectors. Counted only while the
+	// target drives the bus.
+	//   Xor  = every bit that has ever differed.
+	//   Ddr  = of those, the ones DDRA had as outputs. Equal to Xor means the
+	//          direction merge explains all of it; zero with mismatches means
+	//          it is the CA1 latch path instead.
+	static u32 scsiBusReads;
+	static u32 scsiBusMismatches;
+	static u8 scsiBusMismatchXor;
+	static u8 scsiBusMismatchDdr;
+
 	// Memory bus (called by the CPU on every cycle).
 	u8 Read(u16 address);
 	void Write(u16 address, u8 value);
