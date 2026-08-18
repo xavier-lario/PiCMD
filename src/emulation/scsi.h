@@ -103,6 +103,23 @@ public:
 	static u32 DirtyChunkReads() { return dirtyChunkReads; }
 	static u32 DirtyChunkPartialFills() { return dirtyChunkPartialFills; }
 
+	// Bytes that gain bits 0 and 1 and nothing else between one write of a
+	// sector and the next. That is the signature of the corruption eating the
+	// BAM and directory sectors: never 0x01 alone, never 0x02 alone, always
+	// both, and only ever in sectors the drive reads, modifies and writes back
+	// itself. Caught here rather than by comparing image files afterwards, so
+	// the first event names its own LBA while the machine is still running.
+	//
+	// Only checked when the sector's old contents are already sitting in the
+	// cache, which is exactly the read-modify-write case - so this costs no
+	// card access and cannot add a stall. Three bytes is the floor: real
+	// events run to eleven or more, while a single byte flipping to a low bit
+	// is ordinary data (a block count, a link) and would be noise.
+	static u32 BitRotWrites() { return bitRotWrites; }
+	static u32 BitRotBytes() { return bitRotBytes; }
+	static u32 BitRotFirstLba() { return bitRotFirstLba; }
+	static u8 BitRotMask() { return bitRotMask; }
+
 	// Zero every counter above, plus the stall watermark and the access log.
 	// Called on mount so the figures describe what the computer went on to do
 	// rather than the whole disk scan that precedes it - the scan alone is
@@ -170,6 +187,10 @@ private:
 	static u32 cacheReadMisses;
 	static u32 dirtyChunkReads;
 	static u32 dirtyChunkPartialFills;
+	static u32 bitRotWrites;
+	static u32 bitRotBytes;
+	static u32 bitRotFirstLba;
+	static u8 bitRotMask;
 
 	// 16K entries at 8 bytes is 128KB of BSS, and covers a GEOS install with
 	// room to spare. If it ever wraps, accessLogCount says so and the dump

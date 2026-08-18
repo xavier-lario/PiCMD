@@ -281,10 +281,19 @@ void ScsiImage::ResetCounters()
 	cacheReadMisses = 0;
 	dirtyChunkReads = 0;
 	dirtyChunkPartialFills = 0;
+	bitRotWrites = 0;
+	bitRotBytes = 0;
+	bitRotFirstLba = 0;
+	bitRotMask = 0;
 	accessLogCount = 0;
 	maxLbaWritten = 0;
 	writeLogCount = 0;
 }
+
+u32 ScsiImage::bitRotWrites = 0;
+u32 ScsiImage::bitRotBytes = 0;
+u32 ScsiImage::bitRotFirstLba = 0;
+u8 ScsiImage::bitRotMask = 0;
 
 u32 ScsiImage::pinnedChunks = 0;
 u8 ScsiImage::pinnedImage = 0;
@@ -772,6 +781,36 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 			slot->validMask = 0;
 			slot->dirtyMask = 0;
 		}
+		// Before it is overwritten, ask what changed. See BitRotWrites in the
+		// header: bytes that only ever gain bits 0 and 1 are the corruption,
+		// and this is the one place the before and after are both to hand.
+		if (slot->validMask & (1 << sectorInChunk))
+		{
+			const u8* was = slot->data + sectorInChunk * SECTOR_SIZE;
+			u32 differing = 0;
+			u32 gainedLowBits = 0;
+			u8 gained = 0;
+			for (u32 i = 0; i < SECTOR_SIZE; i++)
+			{
+				if (was[i] == buffer[i])
+					continue;
+				differing++;
+				if ((u8)(buffer[i] & 0xfc) == was[i])
+				{
+					gainedLowBits++;
+					gained |= (u8)(buffer[i] ^ was[i]);
+				}
+			}
+			if (differing >= 3 && gainedLowBits == differing)
+			{
+				if (!bitRotWrites)
+					bitRotFirstLba = lba;
+				bitRotWrites++;
+				bitRotBytes += gainedLowBits;
+				bitRotMask |= gained;
+			}
+		}
+
 		memcpy(slot->data + sectorInChunk * SECTOR_SIZE, buffer, SECTOR_SIZE);
 		slot->validMask |= (u8)(1 << sectorInChunk);
 		slot->dirtyMask |= (u8)(1 << sectorInChunk);
