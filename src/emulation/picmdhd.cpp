@@ -63,6 +63,11 @@ enum
 #define VIA_REG_ORA    1
 #define VIA_REG_ORA_NH 15
 
+u32 PiCMDHD::lostCycles = 0;
+u32 PiCMDHD::lostHist[16];
+u32 PiCMDHD::loopIterations = 0;
+u64 PiCMDHD::sectionCycles[4];
+u32 PiCMDHD::worstLostUs = 0;
 u32 PiCMDHD::scsiBusReads = 0;
 u32 PiCMDHD::scsiBusMismatches = 0;
 u8 PiCMDHD::scsiBusMismatchXor = 0;
@@ -636,6 +641,59 @@ void PiCMDHD::Eject()
 	// Last chance to get the access log off the machine. The bus is finished
 	// with us by now, so the card can take as long as it likes. Done before
 	// the Detach loop only so a failure here cannot leave an image attached.
+	// The two numbers this build exists for, written where they cannot be lost
+	// to somebody forgetting to photograph the screen. Eject only, so it costs
+	// the emulation loop nothing.
+	{
+		char name[32];
+		FILINFO fno;
+		for (unsigned n = 0; n <= 99; ++n)
+		{
+			snprintf(name, sizeof(name), "PICMD-LST%02u.LOG", n);
+			if (f_stat(name, &fno) == FR_OK)
+				continue;
+			FIL fp;
+			if (f_open(&fp, name, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+			{
+				char line[128];
+				UINT written;
+				int len = snprintf(line, sizeof(line),
+					"loops %u  lost %u (%u per mille)  worst %u us\r\n",
+					PiCMDHD::loopIterations, PiCMDHD::lostCycles,
+					PiCMDHD::loopIterations
+						? (u32)((u64)PiCMDHD::lostCycles * 1000
+							/ PiCMDHD::loopIterations) : 0,
+					PiCMDHD::worstLostUs);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				static const char* names[4] = {
+					"read IEC ", "cpu+vias ", "drive IEC", "leds+btns" };
+				for (u32 sec = 0; sec < 4; sec++)
+				{
+					len = snprintf(line, sizeof(line),
+						"  %s : %u cycles/loop avg\r\n", names[sec],
+						PiCMDHD::loopIterations
+							? (u32)(PiCMDHD::sectionCycles[sec]
+								/ PiCMDHD::loopIterations) : 0);
+					if (len > 0)
+						f_write(&fp, line, (UINT)len, &written);
+				}
+				for (u32 b = 2; b < 16; b++)
+				{
+					if (!PiCMDHD::lostHist[b])
+						continue;
+					len = snprintf(line, sizeof(line),
+						"  overran by %2u us : %u\r\n", b - 1,
+						PiCMDHD::lostHist[b]);
+					if (len > 0)
+						f_write(&fp, line, (UINT)len, &written);
+				}
+				f_close(&fp);
+			}
+			break;
+		}
+	}
+
 	ScsiImage::DumpAccessLog("PICMD-LBA");
 	ScsiImage::DumpWriteLog("PICMD-WR");
 

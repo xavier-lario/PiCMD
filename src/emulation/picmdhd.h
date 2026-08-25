@@ -147,6 +147,32 @@ public:
 	//   Ddr  = of those, the ones DDRA had as outputs. Equal to Xor means the
 	//          direction merge explains all of it; zero with mismatches means
 	//          it is the CA1 latch path instead.
+	// Microseconds the main loop overran its 1us budget. Pi1541 has always had
+	// the test for this in main.cpp with an empty body and a commented-out
+	// log, beside its author's note that it can make emulation fail inside
+	// critical communication loops. This build exists to measure it with
+	// NOTHING else added, so the number cannot be blamed on the
+	// investigation's own instrumentation.
+	static u32 lostCycles;
+	static u32 worstLostUs;
+	// Count and worst-case say nothing about shape, and shape is what decides
+	// this: thousands of one-microsecond slips is a different fault from a
+	// handful of thirteen-microsecond stalls. Bucket by overrun size, and
+	// count every iteration so the rate can be stated as a fraction rather
+	// than as a bare million.
+	static u32 lostHist[16];
+	static u32 loopIterations;
+
+	// Where the microsecond actually goes. Skipping the two redundant GPIO
+	// writes moved the overrun rate from 63 to 62 per mille, i.e. nowhere, so
+	// the cost is elsewhere and guessing again would be a fourth wrong guess.
+	// The ARM cycle counter is the only clock fine enough to see inside a body
+	// that is shorter than one tick of the system timer; performance.c has the
+	// code to enable it and nothing in the tree ever called it.
+	//   0 = reading the IEC lines   1 = two CPU cycles plus VIA/RTC update
+	//   2 = driving the IEC lines   3 = LEDs, buttons, idle-flush check
+	static u64 sectionCycles[4];
+
 	static u32 scsiBusReads;
 	static u32 scsiBusMismatches;
 	static u8 scsiBusMismatchXor;

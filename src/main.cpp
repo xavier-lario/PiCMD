@@ -826,9 +826,8 @@ void UpdateScreen()
 				// change is indistinguishable from one that was never drawn -
 				// which is exactly how the first run read. Riding on a counter
 				// that never stops moving makes a row of zeros a result.
-				snprintf(tempBuffer, tempBufferSize, "sr mode %02x in %u out %u full %u short %u   ",
-					m6522::srModeMask, m6522::srShiftsIn, m6522::srShiftsOut,
-					m6522::srEdgesWhileFull, m6522::srShortReads);
+				snprintf(tempBuffer, tempBufferSize, "lost %u worst %u us   ",
+					PiCMDHD::lostCycles, PiCMDHD::worstLostUs);
 				screen.PrintText(false, 0, y - 144, tempBuffer, textColour, bgColour);
 
 				// Same reasoning as the shift register line above: a counter
@@ -1031,9 +1030,18 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	static const u32 SLOW_TICK_EVERY = 256;
 	u32 slowTick = 0;
 
+	// Turn on the ARM cycle counter: E|P|C set, D clear so it counts every
+	// cycle rather than every 64th, then enable PMCCNTR itself (bit 31).
+	asm volatile ("mcr p15,0,%0,c9,c12,0" :: "r" (0x07) : "memory");
+	asm volatile ("mcr p15,0,%0,c9,c12,1" :: "r" (1u << 31) : "memory");
+	#define PMCC(v) asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v))
+
 	while (exitReason == EXIT_UNKNOWN)
 	{
+		u32 pmc0, pmc1, pmc2, pmc3, pmc4;
+		PMCC(pmc0);
 		IEC_Bus::ReadEmulationModeCMDHD();
+		PMCC(pmc1);
 
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
@@ -1042,7 +1050,9 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			piCMDHD.Update();
 		}
 
+		PMCC(pmc2);
 		IEC_Bus::RefreshOutsCMDHD();	// Now output all outputs.
+		PMCC(pmc3);
 
 		IEC_Bus::OutputLED = piCMDHD.IsActivityLEDOn();
 #if defined(RPI3)
@@ -1180,6 +1190,12 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (ctAfter));
 		} while ((ctAfter - ctBefore) < clockCycles1MHz);
 #else
+		PMCC(pmc4);
+		PiCMDHD::sectionCycles[0] += (u32)(pmc1 - pmc0);
+		PiCMDHD::sectionCycles[1] += (u32)(pmc2 - pmc1);
+		PiCMDHD::sectionCycles[2] += (u32)(pmc3 - pmc2);
+		PiCMDHD::sectionCycles[3] += (u32)(pmc4 - pmc3);
+		PiCMDHD::loopIterations++;
 		do	// Sync to the 1MHz clock
 		{
 			ctAfter = read32(ARM_SYSTIMER_CLO);
@@ -1188,7 +1204,10 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			{
 				// If this ever occurs then we have taken too long (ie >1us) and lost a cycle.
 				// Cycle accuracy is now in jeopardy. If this occurs during critical communication loops then emulation can fail!
-				//DEBUG_LOG("!");
+				PiCMDHD::lostCycles++;
+				PiCMDHD::lostHist[ct < 16 ? ct : 15]++;
+				if (ct > PiCMDHD::worstLostUs)
+					PiCMDHD::worstLostUs = ct;
 			}
 		} while (ctAfter == ctBefore);
 #endif
