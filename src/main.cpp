@@ -1027,6 +1027,10 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	ctBefore = read32(ARM_SYSTIMER_CLO);
 #endif
 
+	// See the note beside the slow-tick gate in the loop below.
+	static const u32 SLOW_TICK_EVERY = 256;
+	u32 slowTick = 0;
+
 	while (exitReason == EXIT_UNKNOWN)
 	{
 		IEC_Bus::ReadEmulationModeCMDHD();
@@ -1055,6 +1059,17 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// drive cannot acknowledge ATN, so the computer decides it has gone
 		// away. Doing this on a timer instead landed it between SCSI commands,
 		// which is the worst possible moment.
+		// Everything from here to the end of the button handling costs 189 of
+		// the 1179 cycles this loop body was measured to use, against a
+		// microsecond budget of about 1200 on a 1.2GHz Pi 3 - 98% consumed, so
+		// there is no room for a cache miss, and 6-7% of iterations overrun.
+		// None of it needs a microsecond cadence: buttons are mechanical, the
+		// LED is for human eyes, and the idle-flush poll is a counter whose
+		// threshold can simply be scaled. Run the lot once every 256 loops,
+		// which is a quarter of a millisecond - imperceptible on a button and
+		// invisible on a lamp.
+		if ((++slowTick & (SLOW_TICK_EVERY - 1)) == 0)
+		{
 		{
 			static u32 lastAccessCount = 0;
 			static u32 quietLoops = 0;
@@ -1064,7 +1079,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 				lastAccessCount = accessCount;
 				quietLoops = 0;
 			}
-			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
+			else if (++quietLoops >= 500000 / SLOW_TICK_EVERY)	// scaled: this block now runs at 1MHz/SLOW_TICK_EVERY
 			{
 				quietLoops = 0;
 				// Drain as much of the backlog as the quiet lasts. Without the
@@ -1075,7 +1090,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			}
 		}
 
-		IEC_Bus::ReadGPIOUserInput();
+		IEC_Bus::ReadGPIOUserInput(SLOW_TICK_EVERY);
 
 		// SWAP 8, SWAP 9 and WRITE PROTECT are momentary, just like the real
 		// front panel; HDOS samples them and decides what they mean.
@@ -1132,7 +1147,12 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			if (exitDoAutoLoad)
 				exitReason = EXIT_AUTOLOAD;
 		}
+		}	// end slow tick
 
+		// Reset detection stays on every iteration: resetCount counts loops,
+		// so moving it inside the slow tick would silently multiply its
+		// threshold by 256, and IsReset() only reads a flag the IEC sample
+		// already set.
 		// A reset on the IEC bus resets the drive but, unlike a floppy drive
 		// in a caddy workflow, a hard drive stays attached; keep emulating.
 		bool reset = IEC_Bus::IsReset();

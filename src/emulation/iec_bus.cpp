@@ -75,11 +75,11 @@ u32 IEC_Bus::emulationModeCheckButtonIndex = 0;
 
 unsigned IEC_Bus::gplev0;
 
-void IEC_Bus::ReadGPIOUserInput()
+void IEC_Bus::ReadGPIOUserInput(unsigned step)
 {
 	for (int index = 0; index < buttonCount; ++index)
 	{
-		UpdateButton(index, gplev0);
+		UpdateButton(index, gplev0, step);
 	}
 }
 
@@ -295,6 +295,27 @@ void IEC_Bus::PortB_OnPortOut(void* pUserData, unsigned char status)
 
 	ClockSetToOut = VIA_Clock;
 	DataSetToOut = VIA_Data;
+
+	// Put the change on the wire now rather than waiting for the main loop's
+	// once-per-microsecond refresh.
+	//
+	// The drive answers a strobe by writing this port and then counting NOPs:
+	// its first transmitted symbol is due about 14 cycles - 7us - after the
+	// poll that spotted the strobe, and the following three have 7.5 to 10us
+	// of slack. Deferring the write to the end of the microsecond spends up to
+	// 1us of that first budget for nothing, and the first symbol is where 404
+	// of 422 observed bit flips land.
+	//
+	// It is close to free: these flags only move when the CPU writes the port,
+	// which is four times per transmitted byte against roughly 35us of
+	// transfer, so the common case does not reach here at all. Writes to
+	// device memory are posted, so the store itself does not stall either.
+	if (DataSetToOut != oldDataSetToOut ||
+		ClockSetToOut != oldClockSetToOut ||
+		AtnaDataSetToOut != AtnaDataSetToOutOld)
+	{
+		RefreshOutsCMDHD();
+	}
 
 	//if (!oldDataSetToOut && DataSetToOut)
 	//{
