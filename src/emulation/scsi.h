@@ -27,6 +27,25 @@
 
 struct scsi_context_s;
 
+// Write-path forensics: the payload ring and the bit-rot scan, both of which
+// live inside WriteSector and therefore run on the emulation thread, once per
+// 512 byte sector the computer writes.
+//
+// Off by default because they are not free, contrary to what the comment above
+// BitRotWrites used to claim. A 512 byte memcpy plus a 512 iteration compare
+// land on ONE iteration of a loop whose budget is 1.2us. PICMD-LST18.LOG, from
+// a GEOS installation, counts 745 + 1656 + 113 = 2514 overruns of three, four
+// and five microseconds, against 2515 sector writes in PICMD-WR00.LOG: one
+// apiece, no exceptions. The drive's deadline for the first symbol of a
+// transmitted byte is ten CPU cycles, 5us, and that symbol carries bits 0 and
+// 1 - the bits this scan exists to watch being set. So the instrumentation is
+// large enough to cause the fault it was written to catch, which is the same
+// trap D4 of the timing handoff already recorded once.
+//
+// Set to 1 for a run that needs the payload log or the live rot counter, and
+// read the resulting numbers knowing they were bought at that price.
+#define PICMD_WRITE_FORENSICS 0
+
 // A SCSI hard disk image backed by a FatFS file.
 //
 // Accesses go through a write-back cache of CACHE_CHUNK_SIZE chunks so that

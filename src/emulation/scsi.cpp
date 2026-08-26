@@ -756,6 +756,7 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 
 	LogAccess(lba, 'W', 0);
 
+#if PICMD_WRITE_FORENSICS
 	// Keep the payload too. accessLogCount has just been bumped past this
 	// access, so seq-1 is the entry in the address log that matches.
 	{
@@ -765,6 +766,7 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 		writeLogSeq[slot] = accessLogCount - 1;
 		writeLogCount++;
 	}
+#endif
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
@@ -781,6 +783,7 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 			slot->validMask = 0;
 			slot->dirtyMask = 0;
 		}
+#if PICMD_WRITE_FORENSICS
 		// Before it is overwritten, ask what changed. See BitRotWrites in the
 		// header: bytes that only ever gain bits 0 and 1 are the corruption,
 		// and this is the one place the before and after are both to hand.
@@ -810,6 +813,7 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 				bitRotMask |= gained;
 			}
 		}
+#endif
 
 		memcpy(slot->data + sectorInChunk * SECTOR_SIZE, buffer, SECTOR_SIZE);
 		slot->validMask |= (u8)(1 << sectorInChunk);
