@@ -97,6 +97,9 @@ void m6522::Reset()
 	cb1OutputShiftClockPositiveEdge = false;
 	cb2Shift = 1;				// fast serial data line idles released
 	OutputIRQ();
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }
 
 void m6522::InputCA1(bool value)
@@ -151,27 +154,37 @@ void m6522::InputCB2(bool value)
 // Update for a single cycle
 void m6522::Execute()
 {
+	if (ca2 && pulseCA2) ca2 = false;
+	if (cb2 && pulseCB2) cb2 = false;
+
 	// An idle VIA still costs about 76 ARM cycles per call, and there are four
-	// calls per emulated microsecond in a loop that has roughly 80 cycles to
-	// spare. On this machine U9 is idle for the whole session: measured, not
-	// assumed - PICMD-LST27.LOG reports "U9 everT1 0 everT2 0 everACR 0 acr 00
-	// ticking 0/0" while U10 reports 1/1/1 with acr 4c, so the detector fires
-	// and the zero is a real zero. Neither the boot ROM nor the HDOS kernel in
-	// RAM ever writes U9's T1CH, T2CH or ACR.
+	// calls per emulated microsecond in a loop that has little to spare. On
+	// this machine U9 is idle for whole sessions - measured, not assumed:
+	// PICMD-LST33.LOG reports "idle at eject: U9 acr 00 t1 0 t2 0" while U10
+	// reports "acr 4c t1 1 t2 1", so the detector fires and the zero is real.
+	// Neither the CMD HD boot ROM nor the HDOS kernel writes U9's T1CH, T2CH
+	// or ACR at all.
 	//
-	// Every term below corresponds to a block further down that would
-	// otherwise have something to do. With all of them false the only things
-	// this function still changes are the two end-of-function assignments,
-	// which are done here instead - skipping cb1Old would leave a stale value
-	// for the shift register's edge detector to trip over if ACR were ever
-	// written afterwards.
-	if (PICMD_VIA_IDLE_SKIP &&
-		!t1TimedOut && !t1Ticking && !t1Reload &&
-		!t2TimedOut && !t2CountingDown &&
-		auxiliaryControlRegister == 0 &&
-		!cb1OutputShiftClockPositiveEdge &&
-		!(ca2 && pulseCA2) && !(cb2 && pulseCB2))
+	// The predicate is ONE cached boolean on purpose. The first version tested
+	// nine pieces of state here and cost about 44 cycles - paid on all four
+	// calls while the saving is only collected on the two idle ones - so it
+	// came out 25 cycles per microsecond WORSE than no early-out at all
+	// (PICMD-LST31 against LST29). Every term now lives in idleCache, which is
+	// recomputed in Write() and Reset(), the only two places that can turn any
+	// of them on: while the cache is true nothing reachable sets t1Ticking,
+	// t2CountingDown, t1TimedOut, t2TimedOut, t1Reload or the pending shift
+	// clock edge, because every one of their setters is inside the code this
+	// skips. That is what makes caching safe rather than merely cheap.
+	//
+	// The two pulse tests above stay outside: they are what the function did
+	// first anyway, they are cheap, and keeping them out of the predicate is
+	// most of why it is now a single load.
+#if PICMD_VIA_IDLE_SKIP
+	if (idleCache)
 	{
+		// Faithful to the two assignments at the end of the function. cb1Old
+		// especially: dropping it would leave a stale level for the shift
+		// register's edge detector if ACR were written later.
 		cb1Old = cb1;
 		t2CountingPB6ModeOld = t2CountingPB6Mode;
 #if PICMD_SPLIT_CPUVIAS
@@ -179,12 +192,11 @@ void m6522::Execute()
 #endif
 		return;
 	}
+#endif
 #if PICMD_SPLIT_CPUVIAS
 	busyRuns++;
 #endif
 
-	if (ca2 && pulseCA2) ca2 = false;
-	if (cb2 && pulseCB2) cb2 = false;
 
 	// The t1 counter decrements on each succeeding phi2 from N to 0 and then one half phi2 cycle later IRQ goes active.
 	// (where N is the combined count value of T1CL and T1CH)
@@ -797,4 +809,7 @@ void m6522::Write(unsigned int address, unsigned char value)
 			WritePortA(value, false);
 		break;
 	}
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }

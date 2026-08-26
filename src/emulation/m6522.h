@@ -240,6 +240,22 @@ FCR/PCR
 	// mode and by pulse mode in Execute, so a level cached outside this object
 	// would miss an edge - and a missed fast serial edge is a corrupted bit in
 	// exactly the mechanism under investigation.
+#if PICMD_VIA_IDLE_SKIP
+	// True when Execute() would provably do nothing but its two trailing
+	// assignments. Recomputed only in Write() and Reset(), which are the only
+	// places that can turn any of these on - while it is true, every setter of
+	// every term below sits inside the code the early-out skips, so the cache
+	// cannot go stale. Cheap on purpose: the version that tested all of this
+	// per call cost more than it saved.
+	void UpdateIdleCache()
+	{
+		idleCache = (auxiliaryControlRegister == 0)
+			&& !t1Ticking && !t2CountingDown
+			&& !t1TimedOut && !t2TimedOut && !t1Reload
+			&& !cb1OutputShiftClockPositiveEdge;
+	}
+#endif
+
 	// Always available, not diagnostic: the deployed build reports these at
 	// eject so a session that woke U9 up says so.
 	unsigned char AcrValue() const { return auxiliaryControlRegister; }
@@ -409,6 +425,9 @@ private:
 	unsigned char latchedValueB;
 	bool cb1;
 	bool cb1Old;
+#if PICMD_VIA_IDLE_SKIP
+	bool idleCache;
+#endif
 	bool cb2;
 	bool pulseCB2;
 
