@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c/scsi.h written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -134,6 +134,10 @@ public:
 	// card access and cannot add a stall. Three bytes is the floor: real
 	// events run to eleven or more, while a single byte flipping to a low bit
 	// is ordinary data (a block count, a link) and would be noise.
+	// Sectors the card refused and that were dropped when the image detached.
+	// Anything other than zero here is user data that did not survive.
+	static u32 UnflushedSectors() { return unflushedSectors; }
+
 	static u32 BitRotWrites() { return bitRotWrites; }
 	static u32 BitRotBytes() { return bitRotBytes; }
 	static u32 BitRotFirstLba() { return bitRotFirstLba; }
@@ -177,7 +181,7 @@ public:
 	// Flush dirty chunks and FatFS metadata. Does nothing unless forced -
 	// going to the card at an arbitrary moment is what broke the bus. Detach
 	// forces it; everything else waits for FlushIdle.
-	void Sync(bool force = false);
+	bool Sync(bool force = false);
 
 	// Read the front of the image into the cache and pin it, so that region
 	// never costs an SD access again. Call it at mount and nowhere else: it
@@ -206,6 +210,7 @@ private:
 	static u32 cacheReadMisses;
 	static u32 dirtyChunkReads;
 	static u32 dirtyChunkPartialFills;
+	static u32 unflushedSectors;
 	static u32 bitRotWrites;
 	static u32 bitRotBytes;
 	static u32 bitRotFirstLba;
@@ -256,6 +261,7 @@ private:
 	// Push one dirty chunk out to the card. Used when a slot is reused for
 	// something else, and by Sync.
 	int FlushChunk(CacheSlot& slot);
+	u32 DirtySectorCount();
 	bool FlushAllDirty(bool (*abort)() = 0);	// false if abort stopped it early
 	static void NoteStall(u32 startMicros);
 

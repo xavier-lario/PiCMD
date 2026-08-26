@@ -721,6 +721,16 @@ void PiCMDHD::Eject()
 					}
 				}
 #endif
+				// Loud on purpose, and printed even when zero so that a zero
+				// is a statement rather than an absence. Anything else here is
+				// user data the card refused and that was dropped when the
+				// image detached.
+				len = snprintf(line, sizeof(line),
+					"UNFLUSHED SECTORS AT DETACH: %u\r\n",
+					ScsiImage::UnflushedSectors());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+
 				// Free, and it answers the one question the deployed build
 				// otherwise cannot: whether U9 stayed idle for the whole
 				// session. t1Ticking and t2CountingDown are latches that only

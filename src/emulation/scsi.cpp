@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -30,7 +30,7 @@
 #define MAXLUNS 8
 
 ///////////////////////////////////////////////////////////////////////////////
-// ScsiImage - a FatFS backed hard disk image with a write-through cache.
+// ScsiImage - a FatFS backed hard disk image with a write-back cache.
 ///////////////////////////////////////////////////////////////////////////////
 
 u8* ScsiImage::cachePool = 0;
@@ -139,7 +139,16 @@ void ScsiImage::Detach()
 {
 	if (attached)
 	{
-		Sync(true);
+		// Retry before giving up. Below, every slot belonging to this image is
+		// invalidated, so whatever is still dirty at that point is gone - and
+		// this is the last chance to notice. A transient write error is worth
+		// a second attempt; a full card is not going to improve, but it is
+		// going to be reported instead of swallowed.
+		for (u32 attempt = 0; attempt < 3 && !Sync(true); ++attempt)
+			;
+		if (needSync)
+			unflushedSectors += DirtySectorCount();
+
 		f_close(&file);
 		attached = false;
 
@@ -167,10 +176,10 @@ void ScsiImage::Detach()
 	}
 }
 
-void ScsiImage::Sync(bool force)
+bool ScsiImage::Sync(bool force)
 {
 	if (!attached || !needSync)
-		return;
+		return true;
 
 	// Only ever flush on demand. This used to run on a timer from the SCSI
 	// state machine returning to BUSFREE - which is between commands, exactly
@@ -179,11 +188,31 @@ void ScsiImage::Sync(bool force)
 	// wait, so the drive vanished mid-transfer. Flushing now happens only when
 	// the bus has gone quiet (FlushIdle) or on detach.
 	if (!force)
-		return;
+		return true;
 
-	FlushAllDirty();
+	// needSync stays set when this fails, so the next quiet moment - or the
+	// next Detach - tries again rather than the data quietly ceasing to exist.
+	if (!FlushAllDirty())
+		return false;
+
 	f_sync(&file);
 	needSync = false;
+	return true;
+}
+
+// Sectors still marked dirty across every slot of this image: what would be
+// thrown away if the slots were invalidated right now.
+u32 ScsiImage::DirtySectorCount()
+{
+	u32 n = 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (!(cacheSlots[i].valid && cacheSlots[i].image == imageId))
+			continue;
+		u8 m = cacheSlots[i].dirtyMask;
+		while (m) { n += (m & 1); m >>= 1; }
+	}
+	return n;
 }
 
 ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
@@ -290,6 +319,7 @@ void ScsiImage::ResetCounters()
 	writeLogCount = 0;
 }
 
+u32 ScsiImage::unflushedSectors = 0;
 u32 ScsiImage::bitRotWrites = 0;
 u32 ScsiImage::bitRotBytes = 0;
 u32 ScsiImage::bitRotFirstLba = 0;
@@ -879,7 +909,14 @@ bool ScsiImage::FlushAllDirty(bool (*abort)())
 		// under way the CPU is frozen for as long as the card takes.
 		if (abort && abort())
 			return false;
-		FlushChunk(cacheSlots[i]);
+		// FlushChunk leaves dirtyMask set on purpose when the write did not
+		// land, so the caller can come back for it. Dropping the return here
+		// turned that into "we tried once and then forgot": Sync cleared
+		// needSync on the strength of a true that meant nothing, and Detach
+		// invalidated the slots underneath. A full or failing card lost the
+		// user's sectors without a word.
+		if (FlushChunk(cacheSlots[i]) != 0)
+			return false;
 	}
 	return true;
 }
