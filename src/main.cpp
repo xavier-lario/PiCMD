@@ -1111,6 +1111,32 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
+			// Look at the bus again before the second emulated cycle.
+			//
+			// The drive waits for the computer's strobe in a seven cycle poll
+			// ($0372 BIT $8000 / $0375 BEQ $0372, so every 3.5us) and then has
+			// ten cycles - 5us - to get the first symbol of a byte onto the
+			// wires. That symbol carries bits 0 and 1, and between symbols the
+			// lines are parked at a state that decodes as both of them set, so
+			// a late symbol hands the computer the byte with 0x03 ORed in:
+			// 0x00 -> 0x03 in the BAM, 0x28 -> 0x2b in the free counts,
+			// GEOS -> GGOS, a space becoming a '#'.
+			//
+			// Sampling once per emulated microsecond makes the drive see the
+			// strobe late on every byte, whether or not the loop overran - and
+			// with overruns down to 69 in 494 million, a systematic delay is
+			// all that is left to explain what still corrupts.
+			//
+			// Stated honestly, this is not "1us of latency becomes 0.5us". The
+			// poll is seven cycles, an odd number, so the cycle on which the
+			// BIT reads the port alternates parity and only half the polls can
+			// benefit. What falls is how often a poll misses the strobe
+			// outright, and a missed poll costs the whole 3.5us to the next
+			// look. Expect the corruption rate to fall by something like six
+			// times, not to zero, and measure a rate.
+			if (cycle2MHz)
+				IEC_Bus::ReadBusInputsCMDHD();
+
 #if PICMD_SPLIT_CPUVIAS
 			u32 st0 = PiCMDArmCycles();
 			piCMDHD.m65c02.Step();

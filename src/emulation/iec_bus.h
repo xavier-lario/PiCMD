@@ -441,6 +441,7 @@ public:
 	static void ReadBrowseMode(void);
 	static void ReadGPIOUserInput(unsigned step = 1);
 	static void ReadEmulationModeCMDHD(void);
+	static void ReadBusInputsCMDHD(void);
 
 	static void WaitUntilReset(void)
 	{

@@ -128,6 +128,50 @@ void IEC_Bus::ReadBrowseMode(void)
 // the addition of SRQ for fast serial. The one difference that matters is the
 // ATN acknowledge gate: the CMD HD ANDs ATNA with ATN (like the 1581) rather
 // than XORing them (like the 1541).
+// A second, cheap look at the bus, taken between the two emulated CPU cycles.
+//
+// Why a trimmed one rather than another ReadEmulationModeCMDHD: that costs 156
+// cycles and does not fit - it was tried in fe3cdc2 and took the loop to 69
+// overruns per thousand. Of those 156, the blocking read of GPLEV0 is 69,
+// measured (PICMD-LST27.LOG, "read cost: gplev 69"), so most of the rest is
+// decoding that the second look does not need.
+//
+// What it deliberately does NOT do:
+//   - it does not touch PI_Data or PI_Clock. PI_Data feeds via10's CB2 in
+//     PiCMDHD::Update, and cb2 is the data bit of the fast serial shift
+//     register; moving it half a microsecond relative to the CB1 shift clock
+//     could change which side of an SRQ edge a bit lands on. That would
+//     manufacture corruption in the exact mechanism under investigation.
+//     The routines that need serving read ORB, which is portB's input latch.
+//   - it does not touch ATN, which is edge triggered into CA1 and whose
+//     acknowledge already runs on the full sample.
+//   - it does not write IEC_Bus::gplev0, which the front panel sampler reads
+//     once every 256 loops and which must keep meaning "the level at the top
+//     of the loop".
+//
+// The guards match the full sampler exactly: a line the drive is pulling low
+// itself cannot be sensed, because the pin is an output.
+void IEC_Bus::ReadBusInputsCMDHD(void)
+{
+	unsigned lev = read32(ARM_GPIO_GPLEV0);
+
+	IOPort* portB = port;
+	if (!portB)
+		return;
+
+#ifndef REAL_XOR
+	if (!AtnaDataSetToOut && !DataSetToOut)
+#else
+	if (!DataSetToOut)
+#endif
+		portB->SetInput(VIAPORTPINS_DATAIN,
+			(lev & PIGPIO_MASK_IN_DATA) == (invertIECInputs ? PIGPIO_MASK_IN_DATA : 0));
+
+	if (!ClockSetToOut)
+		portB->SetInput(VIAPORTPINS_CLOCKIN,
+			(lev & PIGPIO_MASK_IN_CLOCK) == (invertIECInputs ? PIGPIO_MASK_IN_CLOCK : 0));
+}
+
 void IEC_Bus::ReadEmulationModeCMDHD(void)
 {
 	gplev0 = read32(ARM_GPIO_GPLEV0);
