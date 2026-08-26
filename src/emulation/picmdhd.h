@@ -194,7 +194,13 @@ public:
 	// count every iteration so the rate can be stated as a fraction rather
 	// than as a bare million.
 	static u32 lostHist[16];
-	static u32 loopIterations;
+	// u64, not u32: at one increment per emulated microsecond a 32 bit counter
+	// wraps after 71 minutes 35 seconds, and sectionCycles is already u64 - so
+	// past that point the divisor restarts while the dividend keeps going and
+	// every cycles/loop average and the overrun rate turn to nonsense, quietly.
+	// A GDOS64 installation plus a few GEOS tests passes an hour without
+	// trying, and this counter is the denominator of the whole acceptance test.
+	static u64 loopIterations;
 
 	// Where the microsecond actually goes. Skipping the two redundant GPIO
 	// writes moved the overrun rate from 63 to 62 per mille, i.e. nowhere, so

@@ -688,6 +688,11 @@ private:
 
 	static bool DataSetToOut;
 	static bool AtnaDataSetToOut;
+	// Snapshot of the three above, taken at the end of each full sample, for the
+	// trimmed mid-loop sample to use instead of the live flags.
+	static bool sampledDataSetToOut;
+	static bool sampledAtnaDataSetToOut;
+	static bool sampledClockSetToOut;
 	static bool ClockSetToOut;
 	static bool SRQSetToOut;
 	static bool AtnSetToOut;

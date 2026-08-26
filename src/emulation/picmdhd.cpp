@@ -71,7 +71,7 @@ u32 PiCMDHD::diagReadCost[4];
 u32 PiCMDHD::armClockHz = 0;
 u32 PiCMDHD::lostCycles = 0;
 u32 PiCMDHD::lostHist[16];
-u32 PiCMDHD::loopIterations = 0;
+u64 PiCMDHD::loopIterations = 0;
 u64 PiCMDHD::sectionCycles[4];
 u32 PiCMDHD::worstLostUs = 0;
 u32 PiCMDHD::scsiBusReads = 0;
@@ -669,10 +669,13 @@ void PiCMDHD::Eject()
 				if (len > 0)
 					f_write(&fp, line, (UINT)len, &written);
 				len = snprintf(line, sizeof(line),
-					"loops %u  lost %u (%u per mille)  worst %u us\r\n",
-					PiCMDHD::loopIterations, PiCMDHD::lostCycles,
+					"loops %llu  lost %u (%u per mille, %u ppm)  worst %u us\r\n",
+					(unsigned long long)PiCMDHD::loopIterations, PiCMDHD::lostCycles,
 					PiCMDHD::loopIterations
 						? (u32)((u64)PiCMDHD::lostCycles * 1000
+							/ PiCMDHD::loopIterations) : 0,
+					PiCMDHD::loopIterations
+						? (u32)((u64)PiCMDHD::lostCycles * 1000000
 							/ PiCMDHD::loopIterations) : 0,
 					PiCMDHD::worstLostUs);
 				if (len > 0)
@@ -718,6 +721,18 @@ void PiCMDHD::Eject()
 					}
 				}
 #endif
+				// Free, and it answers the one question the deployed build
+				// otherwise cannot: whether U9 stayed idle for the whole
+				// session. t1Ticking and t2CountingDown are latches that only
+				// Reset clears, so reading them here IS the sticky answer, and
+				// if U9 ever woke up the idle skip in Execute stopped paying
+				// from that moment on with nothing in the log to say so.
+				len = snprintf(line, sizeof(line),
+					"idle at eject: U9 acr %02x t1 %u t2 %u   U10 acr %02x t1 %u t2 %u\r\n",
+					via9.AcrValue(), via9.T1Ticking() ? 1u : 0u, via9.T2Counting() ? 1u : 0u,
+					via10.AcrValue(), via10.T1Ticking() ? 1u : 0u, via10.T2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
 				static const char* names[4] = {
 					"read IEC ", "cpu+vias ", "drive IEC", "leds+btns" };
 				for (u32 sec = 0; sec < 4; sec++)
@@ -1013,10 +1028,15 @@ void PiCMDHD::Write(u16 address, u8 value)
 // of emulated CPU cycles that have passed since the last call. Everything here
 // used to run per emulated cycle and does not need to.
 //
-// The tests are crossings, not equalities. Neither RTC_TICK_CYCLES nor the
-// countdown armed at reset is a multiple of the step, so "== 0" would step
-// straight over zero: the clock would freeze and the virtually held SWAP8 and
-// SWAP9 would never be released, leaving the drive stuck in installation mode.
+// The tests are crossings, not equalities, and the reason is narrower than it
+// first looks - worth writing down, because the obvious justification is wrong.
+// The cold boot countdown IS an exact multiple of the step (16,000,000 = 512 x
+// 31,250), so "== 0" would have worked there and hidden the bug. It is the warm
+// reset countdown of 1,000,000 that leaves a remainder of 64 and would step
+// straight over zero, underflow, and leave SWAP8 and SWAP9 virtually held for
+// another four billion cycles - the drive stuck in installation mode after a
+// front panel reset but not after a power cycle, which is exactly the kind of
+// fault that takes a week to pin down. RTC_TICK_CYCLES has the same remainder.
 // The same trap took out every front panel button the first time this loop was
 // decimated - see UpdateButton in iec_bus.h.
 void PiCMDHD::SlowTick(u32 emulatedCycles)
@@ -1074,6 +1094,14 @@ void PiCMDHD::Update()
 	else
 	{
 		// DATA is sent to CB2, SRQ is sent to CB1.
+		// PI_Data and PI_SRQ are deliberately NOT refreshed by the trimmed
+		// mid-loop sample, so both calls see the same value on the second
+		// emulated cycle as on the first. Do not "fix" that. It keeps CB2, the
+		// fast serial data bit, in a fixed phase against the CB1 shift clock -
+		// moving it half a microsecond could change which side of an SRQ edge a
+		// bit lands on, which manufactures corruption in the mechanism under
+		// investigation - and it is also what makes the level guards below hit
+		// every second call.
 		via10.InputCB2Level(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
 		via10.InputCB1Level(IEC_Bus::GetPI_SRQ());
 	}
