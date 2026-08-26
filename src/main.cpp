@@ -1052,7 +1052,14 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
+#if PICMD_SPLIT_CPUVIAS
+			u32 st0 = PiCMDArmCycles();
 			piCMDHD.m65c02.Step();
+			PiCMDHD::subCycles[0] += (u32)(PiCMDArmCycles() - st0);
+			PiCMDHD::subSamples++;
+#else
+			piCMDHD.m65c02.Step();
+#endif
 			piCMDHD.Update();
 		}
 

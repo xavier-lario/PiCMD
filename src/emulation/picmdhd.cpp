@@ -63,6 +63,10 @@ enum
 #define VIA_REG_ORA    1
 #define VIA_REG_ORA_NH 15
 
+#if PICMD_SPLIT_CPUVIAS
+u64 PiCMDHD::subCycles[3];
+u32 PiCMDHD::subSamples = 0;
+#endif
 u32 PiCMDHD::armClockHz = 0;
 u32 PiCMDHD::lostCycles = 0;
 u32 PiCMDHD::lostHist[16];
@@ -672,6 +676,21 @@ void PiCMDHD::Eject()
 					PiCMDHD::worstLostUs);
 				if (len > 0)
 					f_write(&fp, line, (UINT)len, &written);
+#if PICMD_SPLIT_CPUVIAS
+				if (PiCMDHD::subSamples)
+				{
+					static const char* subNames[3] = {
+						"  65c02 Step      ", "  via9+via10 Exec ", "  rest of Update  " };
+					for (u32 k = 0; k < 3; k++)
+					{
+						len = snprintf(line, sizeof(line),
+							"%s: %u cycles per emulated CPU cycle\r\n", subNames[k],
+							(u32)(PiCMDHD::subCycles[k] / PiCMDHD::subSamples));
+						if (len > 0)
+							f_write(&fp, line, (UINT)len, &written);
+					}
+				}
+#endif
 				static const char* names[4] = {
 					"read IEC ", "cpu+vias ", "drive IEC", "leds+btns" };
 				for (u32 sec = 0; sec < 4; sec++)
@@ -965,8 +984,15 @@ void PiCMDHD::Write(u16 address, u8 value)
 
 void PiCMDHD::Update()
 {
+#if PICMD_SPLIT_CPUVIAS
+	u32 t0 = PiCMDArmCycles();
+#endif
 	via9.Execute();
 	via10.Execute();
+#if PICMD_SPLIT_CPUVIAS
+	u32 t1 = PiCMDArmCycles();
+	subCycles[1] += (u32)(t1 - t0);
+#endif
 
 	// Wire-OR the two VIA IRQ outputs onto the CPU IRQ line.
 	if (via9IRQ.IsAsserted() || via10IRQ.IsAsserted())
@@ -1008,4 +1034,7 @@ void PiCMDHD::Update()
 			UpdateButtonInputs();
 		}
 	}
+#if PICMD_SPLIT_CPUVIAS
+	subCycles[2] += (u32)(PiCMDArmCycles() - t1);
+#endif
 }

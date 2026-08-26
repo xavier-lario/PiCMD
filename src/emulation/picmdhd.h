@@ -37,6 +37,18 @@
 #include "rtc72421.h"
 #include "scsi.h"
 
+// Diagnostic split of the emulation cost. Off in anything you would deploy.
+#define PICMD_SPLIT_CPUVIAS 0
+
+// The ARM cycle counter, already enabled in EmulateCMDHD. Reading it costs a
+// coprocessor access, so only the diagnostic paths use it.
+static inline u32 PiCMDArmCycles(void)
+{
+	u32 v;
+	asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v));
+	return v;
+}
+
 class PiCMDHD
 {
 public:
@@ -153,6 +165,20 @@ public:
 	// critical communication loops. This build exists to measure it with
 	// NOTHING else added, so the number cannot be blamed on the
 	// investigation's own instrumentation.
+	// Split of the cpu+vias section, which is 669 of the loop's ~1120 real
+	// cycles and has always been one opaque number. Diagnostic only: it adds
+	// four more coprocessor reads per emulated CPU cycle, so a kernel built
+	// with it WILL overrun the microsecond and the drive will misbehave. That
+	// is fine - the point is the ratio between the parts, not a working drive.
+	// Mount, open a directory, eject, read the numbers, build it out again.
+	//   0 = m65c02::Step   1 = via9+via10 Execute   2 = rest of Update
+	// Behind the switch so that turning it off rebuilds the deployed kernel
+	// byte for byte rather than merely equivalently.
+#if PICMD_SPLIT_CPUVIAS
+	static u64 subCycles[3];
+	static u32 subSamples;
+#endif
+
 	static u32 lostCycles;
 	static u32 worstLostUs;
 	// ARM clock in Hz as the firmware reported it at boot. The cycles-per-loop
