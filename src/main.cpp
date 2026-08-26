@@ -1134,7 +1134,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			// outright, and a missed poll costs the whole 3.5us to the next
 			// look. Expect the corruption rate to fall by something like six
 			// times, not to zero, and measure a rate.
-			if (cycle2MHz)
+			if (PICMD_SECOND_SAMPLE && cycle2MHz)
 				IEC_Bus::ReadBusInputsCMDHD();
 
 #if PICMD_SPLIT_CPUVIAS

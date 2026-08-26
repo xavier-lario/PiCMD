@@ -165,7 +165,8 @@ void m6522::Execute()
 	// which are done here instead - skipping cb1Old would leave a stale value
 	// for the shift register's edge detector to trip over if ACR were ever
 	// written afterwards.
-	if (!t1TimedOut && !t1Ticking && !t1Reload &&
+	if (PICMD_VIA_IDLE_SKIP &&
+		!t1TimedOut && !t1Ticking && !t1Reload &&
 		!t2TimedOut && !t2CountingDown &&
 		auxiliaryControlRegister == 0 &&
 		!cb1OutputShiftClockPositiveEdge &&
