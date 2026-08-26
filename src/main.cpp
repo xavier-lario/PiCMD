@@ -1195,12 +1195,27 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			}
 			else if (++quietLoops >= 500000 / SLOW_TICK_EVERY)	// scaled: this block now runs at 1MHz/SLOW_TICK_EVERY
 			{
-				quietLoops = 0;
-				// Drain as much of the backlog as the quiet lasts. Without the
-				// abort this went at everything in one go, which after a big
-				// write is thousands of sectors with the CPU frozen - and the
-				// drive is gone for all of it if the computer comes back.
-				ScsiImage::FlushIdle(BusWantsTheDrive);
+				// Drain the backlog a chunk at a time while the quiet lasts.
+				//
+				// Unbounded, this wrote everything owed inside a single loop
+				// iteration with the emulated CPU frozen throughout: 48
+				// milliseconds in one go after a GEOS installation, the worst
+				// overrun in PICMD-LST37.LOG.
+				//
+				// Now it writes one chunk per visit and says which of three
+				// things happened, because they want different answers. More
+				// to do: hold the counter at the threshold so the next slow
+				// tick, 256us away, carries straight on - a long backlog still
+				// clears promptly, but as a run of short freezes with the loop
+				// and the bus alive in between. Stopped, whether because the
+				// computer wants the drive again or because a write failed:
+				// go back to waiting the full half second. Retrying a failed
+				// write every 256us buys nothing, since FatFS latches the
+				// error and the retry never reaches the card.
+				if (ScsiImage::FlushIdle(BusWantsTheDrive) == ScsiImage::FLUSH_MORE)
+					quietLoops = 500000 / SLOW_TICK_EVERY;
+				else
+					quietLoops = 0;
 			}
 		}
 

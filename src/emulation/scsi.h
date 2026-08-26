@@ -164,15 +164,38 @@ public:
 	// now is the bytes. Keeps the whole 512 byte payload of the last writes.
 	static bool DumpWriteLog(const char* prefix);
 
+	// Chunks written per visit to FlushIdle. Not "one card write": FlushChunk
+	// writes each contiguous run of dirty sectors separately, so a 4K chunk
+	// with an alternating dirtyMask costs up to four f_write calls. One chunk
+	// is still the smallest unit the flush can be built out of, and it is what
+	// an eviction already costs - FindSlot flushes a single dirty victim
+	// synchronously - so this bounds the idle drain to a freeze the drive
+	// already survives elsewhere. The caller comes straight back on the next
+	// slow tick while the bus stays quiet, so a backlog drains promptly but in
+	// slices the drive can answer ATN between.
+	static const u32 IDLE_FLUSH_CHUNKS = 1;
+
+	// Why the flush stopped. The three used to be one bool, which meant the
+	// caller could not tell "there is more, come straight back" from "the card
+	// said no" - and retrying a failed write every 256us instead of every half
+	// second is a real-time regression for nothing, since FatFS latches the
+	// error and the retry never reaches the card anyway.
+	enum FlushResult
+	{
+		FLUSH_DONE,		// nothing left owed
+		FLUSH_MORE,		// hit the per-visit bound; come back next slow tick
+		FLUSH_STOPPED	// the bus wants us, or a write failed; back off
+	};
+
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
 	// cannot answer ATN.
 	//
-	// abort is checked before each chunk and stops the run early - one chunk is
-	// already an SD write and there is no getting under that, but the backlog
-	// no longer commits us to draining megabytes with the computer waiting.
-	// Whatever is left stays dirty and goes out at the next quiet moment.
-	static void FlushIdle(bool (*abort)() = 0);
+	// abort is checked before each chunk - and before the per-visit bound, so
+	// that a bound of one does not turn it into a callback that can never
+	// fire. Whatever is left stays dirty and goes out at the next quiet
+	// moment, or at detach.
+	static FlushResult FlushIdle(bool (*abort)() = 0);
 
 	// How many chunks are written but not yet on the card. This is what would
 	// be lost by pulling the power, so it is worth being able to see it.
@@ -262,7 +285,8 @@ private:
 	// something else, and by Sync.
 	int FlushChunk(CacheSlot& slot);
 	u32 DirtySectorCount();
-	bool FlushAllDirty(bool (*abort)() = 0);	// false if abort stopped it early
+	// maxChunks == 0 means unbounded.
+	FlushResult FlushAllDirty(bool (*abort)() = 0, u32 maxChunks = 0);
 	static void NoteStall(u32 startMicros);
 
 	// A chunk being evicted can belong to a different disk, so we need to get

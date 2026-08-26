@@ -192,7 +192,8 @@ bool ScsiImage::Sync(bool force)
 
 	// needSync stays set when this fails, so the next quiet moment - or the
 	// next Detach - tries again rather than the data quietly ceasing to exist.
-	if (!FlushAllDirty())
+	// No bound here: detach has to finish, and by then the bus is done with us.
+	if (FlushAllDirty(0, 0) != FLUSH_DONE)
 		return false;
 
 	f_sync(&file);
@@ -576,7 +577,10 @@ bool ScsiImage::DumpAccessLog(const char* prefix)
 	return true;
 }
 
-void ScsiImage::FlushIdle(bool (*abort)())
+// Returns true only when there is nothing left owed anywhere. False means come
+// back - the bus asked for the drive, a write failed, or the per-visit bound
+// was reached - and needSync is still set on whatever is left.
+ScsiImage::FlushResult ScsiImage::FlushIdle(bool (*abort)())
 {
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
@@ -586,12 +590,14 @@ void ScsiImage::FlushIdle(bool (*abort)())
 			// Stop the moment the bus wants us again rather than finishing the
 			// backlog regardless. f_sync only once there is nothing left, or it
 			// would be paying for metadata on every partial drain.
-			if (!img->FlushAllDirty(abort))
-				return;
+			FlushResult r = img->FlushAllDirty(abort, IDLE_FLUSH_CHUNKS);
+			if (r != FLUSH_DONE)
+				return r;
 			f_sync(&img->file);
 			img->needSync = false;
 		}
 	}
+	return FLUSH_DONE;
 }
 
 u32 ScsiImage::DirtyChunkCount()
@@ -899,16 +905,34 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	return 0;
 }
 
-bool ScsiImage::FlushAllDirty(bool (*abort)())
+ScsiImage::FlushResult ScsiImage::FlushAllDirty(bool (*abort)(), u32 maxChunks)
 {
+	u32 done = 0;
+
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
 		if (!(cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId))
 			continue;
 		// Asked before committing to the write, not after: once FlushChunk is
 		// under way the CPU is frozen for as long as the card takes.
+		//
+		// And asked BEFORE the bound below, not after. The other order looks
+		// harmless and is not: with a bound of one chunk the function would
+		// return at the second dirty slot without ever evaluating abort, so
+		// the callback would become a thing that cannot fire - which is the
+		// failure mode this project has documented three times.
 		if (abort && abort())
-			return false;
+			return FLUSH_STOPPED;
+
+		// Stop after maxChunks and let the caller come back. The emulated CPU
+		// is frozen for every card write in this loop, and unbounded that came
+		// to 48 milliseconds in one go on a GEOS installation - measured, the
+		// worst overrun in PICMD-LST37.LOG. A bound turns one long freeze into
+		// several short ones with the loop running in between. maxChunks == 0
+		// means no bound, for detach, where finishing matters more than
+		// latency.
+		if (maxChunks && done >= maxChunks)
+			return FLUSH_MORE;
 		// FlushChunk leaves dirtyMask set on purpose when the write did not
 		// land, so the caller can come back for it. Dropping the return here
 		// turned that into "we tried once and then forgot": Sync cleared
@@ -916,9 +940,10 @@ bool ScsiImage::FlushAllDirty(bool (*abort)())
 		// invalidated the slots underneath. A full or failing card lost the
 		// user's sectors without a word.
 		if (FlushChunk(cacheSlots[i]) != 0)
-			return false;
+			return FLUSH_STOPPED;
+		++done;
 	}
-	return true;
+	return FLUSH_DONE;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
