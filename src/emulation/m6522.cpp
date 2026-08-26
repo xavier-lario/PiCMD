@@ -36,6 +36,12 @@ u32 m6522::srShiftsOut = 0;
 
 void m6522::Reset()
 {
+#if PICMD_SPLIT_CPUVIAS
+	// Reset is what puts the VIA back to idle, so the sticky bits start clean
+	// with it - otherwise a session would inherit the previous mount's answer.
+	diagStartedT1 = 0; diagStartedT2 = 0; diagWroteACR = 0;
+	diagAcrLast = 0; diagIerLast = 0;
+#endif
 	functionControlRegister = 0;
 	auxiliaryControlRegister = 0;
 
@@ -590,6 +596,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			t1l.bytes.l = value;
 		break;
 		case T1CH:
+#if PICMD_SPLIT_CPUVIAS
+			diagStartedT1 = 1;
+#endif
 			// A write to TICH loads both the high order counter and high order latch with the same value.
 			// Simultaneously the T1LL contents are transferred to the low order counter and the count begins.
 			// If PB7 has been programmed as a TIMER 1 output it will go low on the phi2 following the write operation.
@@ -636,6 +645,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			t2Latch = value;
 		break;
 		case T2CH:
+#if PICMD_SPLIT_CPUVIAS
+			diagStartedT2 = 1;
+#endif
 			// Writing T2CH loads an 8 bit byte into the high order counter and latch (!!!there is no t2lh!!!) and simultaneously loads the low order latch into the low order counter, and the count down is initiated.
 			// If a T2 interrupt has occurred, the write operation will clear the T2 interrupt flag and reset !IRQ.
 			t2c.bytes.h = value;
@@ -656,6 +668,10 @@ void m6522::Write(unsigned int address, unsigned char value)
 			cb1OutputShiftClockPositiveEdge = false;
 		break;
 		case ACR:
+#if PICMD_SPLIT_CPUVIAS
+			diagWroteACR = 1;
+			diagAcrLast = value;
+#endif
 			//bool t1OutPB7Prev = (auxiliaryControlRegister & ACR_T1_OUT_PB7) != 0;
 			auxiliaryControlRegister = value;
 			latchPortA = (value & ACR_PA_LATCH_ENABLE) != 0;
@@ -728,6 +744,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			ClearInterrupt(value);
 		break;
 		case IER:
+#if PICMD_SPLIT_CPUVIAS
+			diagIerLast = value;
+#endif
 			// If bit 7 is a 0, each 1 in bits 6 through 0 clears the corresponding bit in the IER.
 			// For each zero in bits 6 through 0, the corresponding bit is unaffected.
 			if (value & IR_IRQ) interruptEnabledRegister |= value;

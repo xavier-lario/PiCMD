@@ -66,6 +66,7 @@ enum
 #if PICMD_SPLIT_CPUVIAS
 u64 PiCMDHD::subCycles[3];
 u32 PiCMDHD::subSamples = 0;
+u32 PiCMDHD::diagReadCost[4];
 #endif
 u32 PiCMDHD::armClockHz = 0;
 u32 PiCMDHD::lostCycles = 0;
@@ -677,6 +678,26 @@ void PiCMDHD::Eject()
 				if (len > 0)
 					f_write(&fp, line, (UINT)len, &written);
 #if PICMD_SPLIT_CPUVIAS
+				len = snprintf(line, sizeof(line),
+					"read cost: gplev %u  filler %u  gplev+filler %u  systimer %u\r\n",
+					PiCMDHD::diagReadCost[0], PiCMDHD::diagReadCost[1],
+					PiCMDHD::diagReadCost[2], PiCMDHD::diagReadCost[3]);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"U9  everT1 %u everT2 %u everACR %u  acr %02x ier %02x  ticking %u/%u\r\n",
+					(via9.DiagFlags() & 1) ? 1u : 0u, (via9.DiagFlags() & 2) ? 1u : 0u,
+					(via9.DiagFlags() & 4) ? 1u : 0u, via9.DiagAcr(), via9.DiagIer(),
+					via9.DiagT1Ticking() ? 1u : 0u, via9.DiagT2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"U10 everT1 %u everT2 %u everACR %u  acr %02x ier %02x  ticking %u/%u\r\n",
+					(via10.DiagFlags() & 1) ? 1u : 0u, (via10.DiagFlags() & 2) ? 1u : 0u,
+					(via10.DiagFlags() & 4) ? 1u : 0u, via10.DiagAcr(), via10.DiagIer(),
+					via10.DiagT1Ticking() ? 1u : 0u, via10.DiagT2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
 				if (PiCMDHD::subSamples)
 				{
 					static const char* subNames[3] = {

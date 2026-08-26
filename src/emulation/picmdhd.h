@@ -37,17 +37,6 @@
 #include "rtc72421.h"
 #include "scsi.h"
 
-// Diagnostic split of the emulation cost. Off in anything you would deploy.
-#define PICMD_SPLIT_CPUVIAS 0
-
-// The ARM cycle counter, already enabled in EmulateCMDHD. Reading it costs a
-// coprocessor access, so only the diagnostic paths use it.
-static inline u32 PiCMDArmCycles(void)
-{
-	u32 v;
-	asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v));
-	return v;
-}
 
 class PiCMDHD
 {
@@ -177,6 +166,20 @@ public:
 #if PICMD_SPLIT_CPUVIAS
 	static u64 subCycles[3];
 	static u32 subSamples;
+
+	// M2: what a blocking read of Device memory actually costs. The figure
+	// "about 100 cycles for read32(ARM_GPIO_GPLEV0)" is a premise in three
+	// separate arguments in this investigation and has never been measured
+	// once. Run at mount, outside the emulation loop, so it costs the loop
+	// nothing.
+	//   0 = GPLEV0 read, result used immediately
+	//   1 = the same ALU filler with no read at all, as the baseline
+	//   2 = GPLEV0 read with the filler between issue and use
+	//   3 = ARM_SYSTIMER_CLO read, result used immediately
+	// If 2 comes out near max(0,1) rather than near 0+1, the A53 keeps the
+	// Device load in flight and a second bus sample could be issued early and
+	// consumed late for almost nothing - which would end the budget problem.
+	static u32 diagReadCost[4];
 #endif
 
 	static u32 lostCycles;

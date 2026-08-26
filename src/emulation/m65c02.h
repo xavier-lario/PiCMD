@@ -68,6 +68,20 @@ private:
 	}												\
 	else addressModeCycleFn = &M65C02::InstructionFetch;
 
+// Diagnostic split of the emulation cost, and the ARM cycle counter reader the
+// diagnostic paths use. Lives here rather than in picmdhd.h because m6522.h
+// needs it too and does not include picmdhd.h - putting it there silently
+// compiled the counters out of the VIA and the build only failed because a
+// caller referenced them. Off in anything you would deploy.
+#define PICMD_SPLIT_CPUVIAS 0
+
+static inline u32 PiCMDArmCycles(void)
+{
+	u32 v;
+	asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v));
+	return v;
+}
+
 class M65C02
 {
 private:

@@ -1042,6 +1042,62 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	asm volatile ("mcr p15,0,%0,c9,c12,1" :: "r" (1u << 31) : "memory");
 	#define PMCC(v) asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v))
 
+#if PICMD_SPLIT_CPUVIAS
+	// M2. Run once at mount, before the loop, so it costs the emulation
+	// nothing. Reads only - GPLEV0 and the system timer are both harmless to
+	// read - so this cannot disturb the drive.
+	{
+		static volatile u32 sink;
+		const u32 N = 1000;
+		u32 a, b, acc;
+
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+			acc += read32(ARM_GPIO_GPLEV0);
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[0] = (b - a) / N;
+
+		// The same filler with no read, to be subtracted.
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+		{
+			u32 y = i;
+			for (u32 k = 0; k < 8; k++) y = y * 3 + 1;
+			acc += y;
+		}
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[1] = (b - a) / N;
+
+		// Read issued first, filler in between, result consumed after. If the
+		// load is kept in flight this comes out near the larger of the two
+		// above rather than near their sum.
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+		{
+			u32 x = read32(ARM_GPIO_GPLEV0);
+			u32 y = i;
+			for (u32 k = 0; k < 8; k++) y = y * 3 + 1;
+			acc += x + y;
+		}
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[2] = (b - a) / N;
+
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+			acc += read32(ARM_SYSTIMER_CLO);
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[3] = (b - a) / N;
+	}
+#endif
+
 	while (exitReason == EXIT_UNKNOWN)
 	{
 		u32 pmc0, pmc1, pmc2, pmc3, pmc4;

@@ -232,6 +232,21 @@ FCR/PCR
 	inline bool GetCB2() { return cb2; }
 	void InputCB2(bool value);
 
+#if PICMD_SPLIT_CPUVIAS
+	// M1: has this VIA ever left idle? t1Ticking and t2CountingDown are only
+	// cleared in Reset, so a single write to T1CH or T2CH decides for the whole
+	// session whether an early-out in Execute() can ever fire. Sticky rather
+	// than sampled: the answer must not depend on when we looked. Set in
+	// Write(), which only runs when the 65C02 addresses the VIA, so this costs
+	// the emulation loop nothing at all.
+	u8 diagStartedT1, diagStartedT2, diagWroteACR, diagAcrLast, diagIerLast;
+	u8 DiagFlags() const { return (u8)((diagStartedT1 ? 1 : 0) | (diagStartedT2 ? 2 : 0) | (diagWroteACR ? 4 : 0)); }
+	u8 DiagAcr() const { return diagAcrLast; }
+	u8 DiagIer() const { return diagIerLast; }
+	bool DiagT1Ticking() const { return t1Ticking; }
+	bool DiagT2Counting() const { return t2CountingDown; }
+#endif
+
 	void Execute();
 
 	unsigned char Read(unsigned int address);
