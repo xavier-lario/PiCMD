@@ -1003,6 +1003,43 @@ void PiCMDHD::Write(u16 address, u8 value)
 // Per cycle update
 ///////////////////////////////////////////////////////////////////////////////
 
+// Called from the once-every-256-loops block in EmulateCMDHD, with the number
+// of emulated CPU cycles that have passed since the last call. Everything here
+// used to run per emulated cycle and does not need to.
+//
+// The tests are crossings, not equalities. Neither RTC_TICK_CYCLES nor the
+// countdown armed at reset is a multiple of the step, so "== 0" would step
+// straight over zero: the clock would freeze and the virtually held SWAP8 and
+// SWAP9 would never be released, leaving the drive stuck in installation mode.
+// The same trap took out every front panel button the first time this loop was
+// decimated - see UpdateButton in iec_bus.h.
+void PiCMDHD::SlowTick(u32 emulatedCycles)
+{
+	if (rtcTickCountdown > emulatedCycles)
+	{
+		rtcTickCountdown -= emulatedCycles;
+	}
+	else
+	{
+		rtcTickCountdown = RTC_TICK_CYCLES;
+		rtc.Tick();
+	}
+
+	if (virtualButtonCountdown)
+	{
+		if (virtualButtonCountdown > emulatedCycles)
+		{
+			virtualButtonCountdown -= emulatedCycles;
+		}
+		else
+		{
+			virtualButtonCountdown = 0;
+			virtualButtonMask = 0;
+			UpdateButtonInputs();
+		}
+	}
+}
+
 void PiCMDHD::Update()
 {
 #if PICMD_SPLIT_CPUVIAS
@@ -1031,30 +1068,15 @@ void PiCMDHD::Update()
 	else
 	{
 		// DATA is sent to CB2, SRQ is sent to CB1.
-		via10.InputCB2(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
-		via10.InputCB1(IEC_Bus::GetPI_SRQ());
+		via10.InputCB2Level(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
+		via10.InputCB1Level(IEC_Bus::GetPI_SRQ());
 	}
 
-	// Keep the clock moving even if nobody reads it. The RTC works out how much
-	// time has passed from the 32 bit microsecond counter, which wraps every
-	// 71.6 minutes, and it only did that arithmetic when the CPU touched its
-	// registers - so a guest that left the clock alone for longer than one wrap
-	// lost whole wraps. Ticking it here costs a decrement per cycle.
-	if (--rtcTickCountdown == 0)
-	{
-		rtcTickCountdown = RTC_TICK_CYCLES;
-		rtc.Tick();
-	}
-
-	// Installation mode holds SWAP8+SWAP9 virtually for a while after reset.
-	if (virtualButtonCountdown)
-	{
-		if (--virtualButtonCountdown == 0)
-		{
-			virtualButtonMask = 0;
-			UpdateButtonInputs();
-		}
-	}
+	// The RTC tick and the virtual button countdown used to live here, one
+	// decrement each per emulated CPU cycle. They are now in SlowTick below:
+	// both have periods measured in hundreds of thousands of cycles, so a
+	// quarter of a millisecond of granularity is nothing, and two decrements
+	// out of the hot path is real.
 #if PICMD_SPLIT_CPUVIAS
 	subCycles[2] += (u32)(PiCMDArmCycles() - t1);
 #endif

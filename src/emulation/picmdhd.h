@@ -44,7 +44,8 @@ public:
 	PiCMDHD();
 
 	void Initialise();
-	void Update();		// One 2MHz CPU cycle worth of house keeping.
+	void Update();
+	void SlowTick(u32 emulatedCycles);		// One 2MHz CPU cycle worth of house keeping.
 	void Reset();
 
 	// Attach the DHD image (SCSI ID 0 LUN 0) plus any companion .sXY files.

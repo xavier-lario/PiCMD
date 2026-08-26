@@ -1065,7 +1065,10 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		for (u32 i = 0; i < N; i++)
 		{
 			u32 y = i;
-			for (u32 k = 0; k < 8; k++) y = y * 3 + 1;
+			// The barrier is the point. Without it -Ofast solved this loop in
+			// closed form and the filler measured zero cycles, which quietly
+			// invalidated the two figures that depend on it.
+			for (u32 k = 0; k < 8; k++) { y = y * 3 + 1; asm volatile ("" : "+r" (y)); }
 			acc += y;
 		}
 		PMCC(b);
@@ -1081,7 +1084,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		{
 			u32 x = read32(ARM_GPIO_GPLEV0);
 			u32 y = i;
-			for (u32 k = 0; k < 8; k++) y = y * 3 + 1;
+			for (u32 k = 0; k < 8; k++) { y = y * 3 + 1; asm volatile ("" : "+r" (y)); }
 			acc += x + y;
 		}
 		PMCC(b);
@@ -1149,6 +1152,12 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// invisible on a lamp.
 		if ((++slowTick & (SLOW_TICK_EVERY - 1)) == 0)
 		{
+		// First, and deliberately: the RESET button handler further down does
+		// a continue out of this block, so anything placed after it would be
+		// skipped on exactly the iteration that arms the countdown it feeds.
+		// Two emulated CPU cycles per loop, SLOW_TICK_EVERY loops per visit.
+		piCMDHD.SlowTick(SLOW_TICK_EVERY * 2);
+
 		{
 			static u32 lastAccessCount = 0;
 			static u32 quietLoops = 0;

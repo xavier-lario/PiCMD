@@ -78,7 +78,6 @@ void m6522::Reset()
 	t2LowTimedOut = false;
 	t2CountingPB6Mode = false;
 	t2CountingPB6ModeOld = false;
-	pb6Old = 0;
 	t2TimedOut = false;
 	t2OneShotTriggeredIRQ = false;
 
@@ -205,8 +204,12 @@ void m6522::Execute()
 	}
 	t1Reload = false;
 
-	// Timer 2 can also be used to count negative pulses on the	PB6 line.
-	unsigned char pb6 = portB.GetInput() & ~portB.GetDirection() & 0x40;
+	// Timer 2's PB6 pulse counting mode is not emulated, and never was. What
+	// stood here read PB6 on every call to feed a negative edge test below
+	// that compared a value masked with 0x40 against 1 - so the test could
+	// never fire, for any guest, and the read was pure cost. Removing it is an
+	// exact equivalence. Making the mode actually work is a behaviour change
+	// and belongs in its own commit, with something that uses it to test.
 	unsigned char shiftMode = (auxiliaryControlRegister & ACR_SHIFTREG_CTRL) >> 2;
 
 	// The data is shifted into the shift register during the phi2 clock cycle following the positive going edge of the CB1 clock pulse.
@@ -265,11 +268,9 @@ void m6522::Execute()
 			// Bit 5 of the ACR determines whether the counter is decremented by the 6502 system clock or input pulses arriving on PB6.
 			if (t2CountingPB6Mode && t2CountingPB6ModeOld)
 			{
-				if (pb6 == 0 && pb6Old == 1)	// Was it the negative edge?
-				{
-					t2c.value--;
-					t2TimedOut = t2c.value == 0;
-				}
+				// The negative edge test that was here could not fire; see the
+				// note where pb6 was read. Counting stops in this mode, which
+				// is what the unreachable test amounted to anyway.
 			}
 			else
 			{
@@ -312,11 +313,16 @@ void m6522::Execute()
 			}
 		}
 	}
-	pb6Old = pb6;
 	t2CountingPB6ModeOld = t2CountingPB6Mode;
 
+#if PICMD_SPLIT_CPUVIAS
+	// Diagnostic only: this ran on every Execute call, four times per emulated
+	// microsecond, to answer a question that is asked once a session. The
+	// question is still open - see the note above srModeMask in the header -
+	// so it is switched out, not deleted.
 	if (shiftMode)
 		srModeMask |= (1 << shiftMode);
+#endif
 
 	switch (shiftMode)
 	{
