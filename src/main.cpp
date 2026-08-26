@@ -236,10 +236,11 @@ void InitialiseHardware()
 	{
 		MaxClk = mp->data.buffer_32[1];
 	}
-	// Keep it. The whole budget argument in EmulateCMDHD rests on how many ARM
-	// cycles fit in a microsecond, and on RPI3 this was read and thrown away,
-	// leaving 1200 as an assumption. clockCycles1MHz cannot settle it - it is
-	// only computed inside the RPI2 branch below. Costs the loop nothing.
+	// Keep it. Every budget argument in this investigation has used "about 1200
+	// cycles per microsecond" without ever reading the clock, and on RPI3 this
+	// value was read here and thrown away. clockCycles1MHz cannot settle it -
+	// that is only computed inside the RPI2 branch below. Costs the loop
+	// nothing, and PICMD-LST23.LOG is the run where it would have mattered.
 	PiCMDHD::armClockHz = MaxClk;
 	RPI_PropertyInit();
 	RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, ARM_CLK_ID, MaxClk);
@@ -1051,50 +1052,6 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
-			// Sample the bus again before the second emulated cycle.
-			//
-			// The drive waits for the computer's strobe in a seven cycle loop
-			// - $0372 BIT $8000, $0375 BEQ $0372 - so it looks every 3.5us,
-			// and from the BIT that sees the strobe it has ten cycles, 5us, to
-			// get the first symbol onto the wires ($0377 LDA $0300,X then
-			// $037a STA $8000). That first symbol carries bits 0 and 1, and
-			// the lines sit parked between symbols at a state that decodes as
-			// both of them set, so a late symbol hands the computer the byte
-			// with 0x03 ORed in. Hence GEOS -> GGOS, 0x28 -> 0x2b in the BAM,
-			// and a space becoming a '#'.
-			//
-			// What this buys, stated carefully, because the obvious way to put
-			// it is wrong. It is NOT "1us of latency becomes 0.5us". The poll
-			// loop is seven cycles, an odd number, so the cycle on which the
-			// BIT reads the port alternates parity and only half the polls can
-			// benefit at all. What changes is how often a poll misses the
-			// strobe entirely: the fraction of strobe arrival phases for which
-			// the drive sees it one emulated cycle late falls from about half
-			// to about a tenth. And a missed poll does not cost half a
-			// microsecond, it costs the whole 3.5us until the next look, which
-			// is most of the first symbol's budget. So: roughly six times
-			// fewer missed polls, not zero. Expect the corruption RATE to
-			// fall, and measure a rate - a pass over five directory openings
-			// proves nothing, as this project has already learned once.
-			//
-			// A second effect nobody asked for: AtnaDataSetToOut is recomputed
-			// in here (iec_bus.cpp) and does not reach the wire until the
-			// refresh below, so an ATN arriving mid-microsecond now pulls DATA
-			// low in this iteration instead of the next. The ATN acknowledge
-			// gets up to a microsecond faster too, which is the failure the
-			// comment above ServiceIECWhileCardBusy describes.
-			//
-			// Trap for later: the residual is an accident of where this call
-			// lands in real time, which is wherever the preceding Step+Update
-			// happens to end. Make cpu+vias cheaper some day and the sample
-			// slides earlier and the window reopens - and the blame will land
-			// on that commit rather than this one.
-			//
-			// The cost lands in the cpu+vias section rather than read IEC.
-			// Compare that figure against LST20's 669 to see what it bought.
-			if (cycle2MHz)
-				IEC_Bus::ReadEmulationModeCMDHD();
-
 			piCMDHD.m65c02.Step();
 			piCMDHD.Update();
 		}
