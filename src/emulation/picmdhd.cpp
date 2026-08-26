@@ -63,6 +63,7 @@ enum
 #define VIA_REG_ORA    1
 #define VIA_REG_ORA_NH 15
 
+u32 PiCMDHD::armClockHz = 0;
 u32 PiCMDHD::lostCycles = 0;
 u32 PiCMDHD::lostHist[16];
 u32 PiCMDHD::loopIterations = 0;
@@ -658,6 +659,11 @@ void PiCMDHD::Eject()
 				char line[128];
 				UINT written;
 				int len = snprintf(line, sizeof(line),
+					"arm %u Hz  budget %u cycles/us\r\n",
+					PiCMDHD::armClockHz, PiCMDHD::armClockHz / 1000000);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
 					"loops %u  lost %u (%u per mille)  worst %u us\r\n",
 					PiCMDHD::loopIterations, PiCMDHD::lostCycles,
 					PiCMDHD::loopIterations

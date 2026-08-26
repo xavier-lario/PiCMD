@@ -155,6 +155,9 @@ public:
 	// investigation's own instrumentation.
 	static u32 lostCycles;
 	static u32 worstLostUs;
+	// ARM clock in Hz as the firmware reported it at boot. The cycles-per-loop
+	// figures below mean nothing without it.
+	static u32 armClockHz;
 	// Count and worst-case say nothing about shape, and shape is what decides
 	// this: thousands of one-microsecond slips is a different fault from a
 	// handful of thirteen-microsecond stalls. Bucket by overrun size, and
