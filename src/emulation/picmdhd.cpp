@@ -692,6 +692,12 @@ void PiCMDHD::Eject()
 				if (len > 0)
 					f_write(&fp, line, (UINT)len, &written);
 				len = snprintf(line, sizeof(line),
+					"idle skips: U9 %u / %u runs   U10 %u / %u runs\r\n",
+					via9.IdleSkips(), via9.IdleSkips() + via9.BusyRuns(),
+					via10.IdleSkips(), via10.IdleSkips() + via10.BusyRuns());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
 					"U10 everT1 %u everT2 %u everACR %u  acr %02x ier %02x  ticking %u/%u\r\n",
 					(via10.DiagFlags() & 1) ? 1u : 0u, (via10.DiagFlags() & 2) ? 1u : 0u,
 					(via10.DiagFlags() & 4) ? 1u : 0u, via10.DiagAcr(), via10.DiagIer(),

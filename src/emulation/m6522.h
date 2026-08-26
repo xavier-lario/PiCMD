@@ -240,6 +240,14 @@ FCR/PCR
 	// mode and by pulse mode in Execute, so a level cached outside this object
 	// would miss an edge - and a missed fast serial edge is a corrupted bit in
 	// exactly the mechanism under investigation.
+#if PICMD_SPLIT_CPUVIAS
+	// How often the idle early-out in Execute actually fires. A saving that is
+	// only taken some of the time is worth only that fraction, and this
+	// project has been wrong about frequencies before.
+	u32 idleSkips, busyRuns;
+	u32 IdleSkips() const { return idleSkips; }
+	u32 BusyRuns() const { return busyRuns; }
+#endif
 	inline void InputCB1Level(bool value) { if (value != cb1) InputCB1(value); }
 	inline void InputCB2Level(bool value) { if (value != cb2) InputCB2(value); }
 	inline bool GetCB2() { return cb2; }

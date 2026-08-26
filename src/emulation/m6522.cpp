@@ -37,6 +37,7 @@ u32 m6522::srShiftsOut = 0;
 void m6522::Reset()
 {
 #if PICMD_SPLIT_CPUVIAS
+	idleSkips = 0; busyRuns = 0;
 	// Reset is what puts the VIA back to idle, so the sticky bits start clean
 	// with it - otherwise a session would inherit the previous mount's answer.
 	diagStartedT1 = 0; diagStartedT2 = 0; diagWroteACR = 0;
@@ -150,6 +151,37 @@ void m6522::InputCB2(bool value)
 // Update for a single cycle
 void m6522::Execute()
 {
+	// An idle VIA still costs about 76 ARM cycles per call, and there are four
+	// calls per emulated microsecond in a loop that has roughly 80 cycles to
+	// spare. On this machine U9 is idle for the whole session: measured, not
+	// assumed - PICMD-LST27.LOG reports "U9 everT1 0 everT2 0 everACR 0 acr 00
+	// ticking 0/0" while U10 reports 1/1/1 with acr 4c, so the detector fires
+	// and the zero is a real zero. Neither the boot ROM nor the HDOS kernel in
+	// RAM ever writes U9's T1CH, T2CH or ACR.
+	//
+	// Every term below corresponds to a block further down that would
+	// otherwise have something to do. With all of them false the only things
+	// this function still changes are the two end-of-function assignments,
+	// which are done here instead - skipping cb1Old would leave a stale value
+	// for the shift register's edge detector to trip over if ACR were ever
+	// written afterwards.
+	if (!t1TimedOut && !t1Ticking && !t1Reload &&
+		!t2TimedOut && !t2CountingDown &&
+		auxiliaryControlRegister == 0 &&
+		!cb1OutputShiftClockPositiveEdge &&
+		!(ca2 && pulseCA2) && !(cb2 && pulseCB2))
+	{
+		cb1Old = cb1;
+		t2CountingPB6ModeOld = t2CountingPB6Mode;
+#if PICMD_SPLIT_CPUVIAS
+		idleSkips++;
+#endif
+		return;
+	}
+#if PICMD_SPLIT_CPUVIAS
+	busyRuns++;
+#endif
+
 	if (ca2 && pulseCA2) ca2 = false;
 	if (cb2 && pulseCB2) cb2 = false;
 
