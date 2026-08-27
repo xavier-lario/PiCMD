@@ -757,6 +757,7 @@ void PiCMDHD::Eject()
 					via10.AcrValue(), via10.T1Ticking() ? 1u : 0u, via10.T2Counting() ? 1u : 0u);
 				if (len > 0)
 					f_write(&fp, line, (UINT)len, &written);
+#if PICMD_SECTION_PROBES
 				static const char* names[4] = {
 					"read IEC ", "cpu+vias ", "drive IEC", "leds+btns" };
 				for (u32 sec = 0; sec < 4; sec++)
@@ -769,6 +770,7 @@ void PiCMDHD::Eject()
 					if (len > 0)
 						f_write(&fp, line, (UINT)len, &written);
 				}
+#endif
 				for (u32 b = 2; b < 16; b++)
 				{
 					if (!PiCMDHD::lostHist[b])
@@ -785,8 +787,10 @@ void PiCMDHD::Eject()
 		}
 	}
 
+#if PICMD_ACCESS_FORENSICS
 	ScsiImage::DumpAccessLog("PICMD-LBA");
 	ScsiImage::DumpWriteLog("PICMD-WR");
+#endif
 
 	for (int i = 0; i < SCSI_MAX_DISKS; i++)
 	{

@@ -299,8 +299,10 @@ u32 ScsiImage::cacheReadMisses = 0;
 u32 ScsiImage::dirtyChunkReads = 0;
 u32 ScsiImage::dirtyChunkPartialFills = 0;
 
+#if PICMD_ACCESS_FORENSICS
 ScsiImage::AccessLogEntry ScsiImage::accessLog[ScsiImage::ACCESS_LOG_ENTRIES];
 u32 ScsiImage::accessLogCount = 0;
+#endif
 u32 ScsiImage::maxLbaWritten = 0;
 
 void ScsiImage::ResetCounters()
@@ -315,9 +317,13 @@ void ScsiImage::ResetCounters()
 	bitRotBytes = 0;
 	bitRotFirstLba = 0;
 	bitRotMask = 0;
+#if PICMD_ACCESS_FORENSICS
 	accessLogCount = 0;
+#endif
 	maxLbaWritten = 0;
+#if PICMD_ACCESS_FORENSICS
 	writeLogCount = 0;
+#endif
 }
 
 u32 ScsiImage::unflushedSectors = 0;
@@ -430,10 +436,12 @@ u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatil
 	return loaded;
 }
 
+#if PICMD_ACCESS_FORENSICS
 u8 ScsiImage::writeLogData[ScsiImage::WRITE_LOG_ENTRIES][ScsiImage::SECTOR_SIZE];
 u32 ScsiImage::writeLogLba[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogSeq[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogCount = 0;
+#endif
 
 // snprintf returns what it would have written, not what it did. Handing that
 // to f_write walks off the end of the buffer.
@@ -444,6 +452,7 @@ static UINT Clamp(int produced, size_t capacity)
 	return (UINT)((size_t)produced < capacity ? (size_t)produced : capacity - 1);
 }
 
+#if PICMD_ACCESS_FORENSICS
 // Every write as it was handed to us, payload and all. Dumped on eject next to
 // the address log, so the two can be lined up by sequence number.
 bool ScsiImage::DumpWriteLog(const char* prefix)
@@ -503,7 +512,9 @@ bool ScsiImage::DumpWriteLog(const char* prefix)
 	f_close(&fp);
 	return true;
 }
+#endif
 
+#if PICMD_ACCESS_FORENSICS
 void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
 {
 	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].lba = lba;
@@ -515,7 +526,9 @@ void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
 	if (op == 'W' && result == 0 && lba > maxLbaWritten)
 		maxLbaWritten = lba;
 }
+#endif
 
+#if PICMD_ACCESS_FORENSICS
 // Write the log out as text. Only ever called from eject, when the bus is
 // already done with us and a slow card costs nothing.
 //
@@ -576,6 +589,7 @@ bool ScsiImage::DumpAccessLog(const char* prefix)
 	f_close(&fp);
 	return true;
 }
+#endif
 
 // Returns true only when there is nothing left owed anywhere. False means come
 // back - the bus asked for the drive, a write failed, or the per-visit bound

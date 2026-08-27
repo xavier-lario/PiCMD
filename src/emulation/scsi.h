@@ -155,14 +155,20 @@ public:
 	// known is where they were going. Held in RAM and written out on eject,
 	// because going to the card while the bus is live is what breaks the
 	// drive.
+#if PICMD_ACCESS_FORENSICS
 	static u32 AccessLogCount() { return accessLogCount; }
+#endif
 	static u32 MaxLbaWritten() { return maxLbaWritten; }
+#if PICMD_ACCESS_FORENSICS
 	static bool DumpAccessLog(const char* prefix);
+#endif
 
 	// The addresses turned out not to be enough: the data lands in the right
 	// sectors and the file still comes out half its length, so what matters
 	// now is the bytes. Keeps the whole 512 byte payload of the last writes.
+#if PICMD_ACCESS_FORENSICS
 	static bool DumpWriteLog(const char* prefix);
+#endif
 
 	// Chunks written per visit to FlushIdle. Not "one card write": FlushChunk
 	// writes each contiguous run of dirty sectors separately, so a 4K chunk
@@ -251,18 +257,29 @@ private:
 		u8 result;		// 0 = accepted, 1 = refused (out of range, detached)
 		u8 pad;
 	};
+#if PICMD_ACCESS_FORENSICS
 	static AccessLogEntry accessLog[ACCESS_LOG_ENTRIES];
 	static u32 accessLogCount;		// total accesses, not entries held
+#endif
 	static u32 maxLbaWritten;
+#if PICMD_ACCESS_FORENSICS
 	void LogAccess(u32 lba, u8 op, u8 result);
+#else
+	// Compiled to nothing rather than removed from the call sites: the calls
+	// mark the three places an access enters the image, which is worth keeping
+	// visible even when nobody is recording them.
+	inline void LogAccess(u32, u8, u8) {}
+#endif
 
 	// 256 payloads of 512 bytes is 128KB, and covers every write a whole file
 	// copy makes with room over.
 	static const u32 WRITE_LOG_ENTRIES = 256;
+#if PICMD_ACCESS_FORENSICS
 	static u8 writeLogData[WRITE_LOG_ENTRIES][SECTOR_SIZE];
 	static u32 writeLogLba[WRITE_LOG_ENTRIES];
 	static u32 writeLogSeq[WRITE_LOG_ENTRIES];	// index into the access log
 	static u32 writeLogCount;
+#endif
 
 	char name[256];
 

@@ -797,6 +797,7 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 96, tempBuffer, textColour, bgColour);
 			}
 
+#if PICMD_ACCESS_FORENSICS
 			// Total accesses and the highest sector written. The log behind
 			// these goes to PICMD-LBA.LOG on eject; this is the summary that
 			// is readable without pulling the card.
@@ -809,6 +810,19 @@ void UpdateScreen()
 					accessLog, ScsiImage::MaxLbaWritten());
 				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
 			}
+#else
+			// Without the forensics there is no access count to show, but the
+			// write watermark costs nothing and is the half of the line that
+			// says whether the computer got where it meant to.
+			static u32 oldMaxLba = 0xffffffff;
+			u32 maxLba = ScsiImage::MaxLbaWritten();
+			if (maxLba != oldMaxLba)
+			{
+				oldMaxLba = maxLba;
+				snprintf(tempBuffer, tempBufferSize, "max wr lba %u   ", maxLba);
+				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
+			}
+#endif
 
 			// The SCSI data bus against what the CPU actually read off it.
 			// The corrupted bytes only ever appear in sectors the drive reads,
@@ -1103,10 +1117,14 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 
 	while (exitReason == EXIT_UNKNOWN)
 	{
+#if PICMD_SECTION_PROBES
 		u32 pmc0, pmc1, pmc2, pmc3, pmc4;
 		PMCC(pmc0);
+#endif
 		IEC_Bus::ReadEmulationModeCMDHD();
+#if PICMD_SECTION_PROBES
 		PMCC(pmc1);
+#endif
 
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
@@ -1148,9 +1166,13 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			piCMDHD.Update();
 		}
 
+#if PICMD_SECTION_PROBES
 		PMCC(pmc2);
+#endif
 		IEC_Bus::RefreshOutsCMDHD();	// Now output all outputs.
+#if PICMD_SECTION_PROBES
 		PMCC(pmc3);
+#endif
 
 		IEC_Bus::OutputLED = piCMDHD.IsActivityLEDOn();
 #if defined(RPI3)
@@ -1309,11 +1331,16 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (ctAfter));
 		} while ((ctAfter - ctBefore) < clockCycles1MHz);
 #else
+#if PICMD_SECTION_PROBES
 		PMCC(pmc4);
 		PiCMDHD::sectionCycles[0] += (u32)(pmc1 - pmc0);
 		PiCMDHD::sectionCycles[1] += (u32)(pmc2 - pmc1);
 		PiCMDHD::sectionCycles[2] += (u32)(pmc3 - pmc2);
 		PiCMDHD::sectionCycles[3] += (u32)(pmc4 - pmc3);
+#endif
+		// Not behind the switch: this is the denominator of the overrun rate,
+		// which is the drive's health meter and has to keep working in a build
+		// nobody is measuring.
 		PiCMDHD::loopIterations++;
 		do	// Sync to the 1MHz clock
 		{

@@ -68,21 +68,6 @@ private:
 	}												\
 	else addressModeCycleFn = &M65C02::InstructionFetch;
 
-// Diagnostic split of the emulation cost, and the ARM cycle counter reader the
-// diagnostic paths use. Lives here rather than in picmdhd.h because m6522.h
-// needs it too and does not include picmdhd.h - putting it there silently
-// compiled the counters out of the VIA and the build only failed because a
-// caller referenced them. Off in anything you would deploy.
-#define PICMD_SPLIT_CPUVIAS 0
-
-// Bisection switches. Both default on; turning one off builds an earlier stage
-// from the SAME source, so the three test kernels differ only in the change
-// under test and not in their instrumentation. Comparing logs between builds
-// that differ in more than one thing is how this investigation lost a week.
-//   1 = skip an idle VIA in m6522::Execute
-#define PICMD_VIA_IDLE_SKIP 1
-//   1 = take the trimmed second look at the bus between the emulated cycles
-#define PICMD_SECOND_SAMPLE 1
 
 static inline u32 PiCMDArmCycles(void)
 {
