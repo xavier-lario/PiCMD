@@ -721,6 +721,20 @@ void PiCMDHD::Eject()
 					}
 				}
 #endif
+				// The single card operation that took longest, from NoteStall.
+				// It belongs next to "worst" above because the two answer
+				// different questions and the difference is the whole point:
+				// "worst" is the longest the emulation loop overran, which
+				// includes however many card writes one visit to the flush
+				// batched together; this is the longest ONE of them took. When
+				// they are equal the batching is gone and what is left is the
+				// card's own tail latency, which is nothing this code can fix.
+				len = snprintf(line, sizeof(line),
+					"worst single SD access: %u us\r\n",
+					ScsiImage::WorstStallMicros());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+
 				// Loud on purpose, and printed even when zero so that a zero
 				// is a statement rather than an absence. Anything else here is
 				// user data the card refused and that was dropped when the
