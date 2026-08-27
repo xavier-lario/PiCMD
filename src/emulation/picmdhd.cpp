@@ -173,15 +173,34 @@ void cmdhd_scsiwrite(scsi_context_t* scsi)
 }
 
 // We don't actually format the disk, we just remove the 16 byte CMD signature
-void cmdhd_scsiformat(scsi_context_t* scsi)
+s32 cmdhd_scsiformat(scsi_context_t* scsi)
 {
 	PiCMDHD* hd = (PiCMDHD*)(scsi->p);
 	int i;
 
-	// leave if we are not the first disk
+	// What FORMAT UNIT is being asked for here is "leave no CMD signature on
+	// this disk", so the three outcomes are:
+	//
+	//   signature found and erased        - done, success
+	//   scanned the whole disk, none there - already true, success
+	//   could not look, or could not erase - failure
+	//
+	// The middle case matters: a fresh blank image has no signature, and
+	// formatting one is exactly what installing a new drive does. Reporting
+	// failure there would break it.
+	s32 result = 0;
+
+	// leave if we are not the first disk - nothing to do, which is not a
+	// failure
 	if (scsi->target != 0 || scsi->lun != 0)
 	{
-		return;
+		return 0;
+	}
+
+	// An image with no size cannot be scanned, let alone formatted.
+	if (hd->imagesize == 0)
+	{
+		return -1;
 	}
 
 	// figure out where to start looking
@@ -207,9 +226,12 @@ void cmdhd_scsiformat(scsi_context_t* scsi)
 	while (scsi->address < hd->imagesize)
 	{
 		hd->scanSector = scsi->address;
-		// stop if we hit the end of the file
+		// stop if we hit the end of the file. The scan is incomplete, so
+		// whether a signature is present is now unknown - that is a failure,
+		// not a clean sweep.
 		if (scsi_image_read_uncached(scsi) < 0)
 		{
+			result = -1;
 			break;
 		}
 		// check for the CMD sig
@@ -221,14 +243,17 @@ void cmdhd_scsiformat(scsi_context_t* scsi)
 			{
 				scsi->data_buf[0x1f0 + i] = 0;
 			}
-			// write it back
-			scsi_image_write(scsi);
+			// write it back. If that fails the signature is still there and
+			// the disk is not formatted, so say so rather than reporting a
+			// successful FORMAT UNIT over an untouched disk.
+			result = scsi_image_write(scsi);
 			break;
 		}
 		// otherwise, keep looking
 		scsi->address += 128;
 	}
 	hd->scanTotal = 0;
+	return result;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -454,6 +479,28 @@ void PiCMDHD::Reset()
 	int units;
 	int i;
 
+	// Write back a bounded amount before the drive restarts.
+	//
+	// Reset is a good moment to get dirty chunks onto the card - the machine
+	// is usually about to be powered off or reconfigured, and the cache is the
+	// only copy of anything acknowledged but not yet written. It is not a free
+	// moment though: this path is reached from the IEC RESET line as well as
+	// from the front panel button, and WaitUntilReset() returns as soon as the
+	// host releases RESET. The computer is therefore already running and about
+	// to poll a drive that cannot answer ATN while it is talking to the card.
+	//
+	// A full flush is unbounded - 32MB of cache is 8192 chunks, a chunk is up to
+	// four separate card accesses when its dirty sectors are not contiguous, and
+	// the worst single access measured on this hardware is 4,959us. That is
+	// minutes with a full cache. So take a slice of wall clock and leave the
+	// rest to FlushIdle, which runs when the bus is genuinely quiet.
+	//
+	// RESET_FLUSH_MICROS is 50ms, about ten of those accesses; scsi.h has the
+	// reasoning, including why it is not the 250ms it was while an access was
+	// believed to cost 35ms. Budgeting low costs a delay in getting the data
+	// out, not the data.
+	ScsiImage::FlushSome(ScsiImage::RESET_FLUSH_MICROS);
+
 	via9.Reset();
 	via10.Reset();
 
@@ -644,12 +691,27 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 
 void PiCMDHD::Eject()
 {
+	// Close the images before writing the log below, not after. The final
+	// flush happens inside Detach, and so does the only place
+	// unflushedSectors is ever added to - it counts what was still dirty
+	// when the file closed. Logging first therefore printed the previous
+	// mount's figure, which is zero on the first eject of a session and
+	// reads as a clean run whatever this one did. The card accesses that
+	// last flush makes belong in the stall watermark for the same reason.
+	for (int i = 0; i < SCSI_MAX_DISKS; i++)
+	{
+		disk[i].Detach();
+		scsi.file[i] = 0;
+	}
+	imagesize = 0;
+	baselba = INVALID_BASELBA;
+	scanNeeded = true;
+
 	// Last chance to get the access log off the machine. The bus is finished
-	// with us by now, so the card can take as long as it likes. Done before
-	// the Detach loop only so a failure here cannot leave an image attached.
-	// The two numbers this build exists for, written where they cannot be lost
-	// to somebody forgetting to photograph the screen. Eject only, so it costs
-	// the emulation loop nothing.
+	// with us and the images are closed, so the card can take as long as it
+	// likes. The two numbers this build exists for, written where they cannot
+	// be lost to somebody forgetting to photograph the screen. Eject only, so
+	// it costs the emulation loop nothing.
 	{
 		char name[32];
 		FILINFO fno;
@@ -791,15 +853,6 @@ void PiCMDHD::Eject()
 	ScsiImage::DumpAccessLog("PICMD-LBA");
 	ScsiImage::DumpWriteLog("PICMD-WR");
 #endif
-
-	for (int i = 0; i < SCSI_MAX_DISKS; i++)
-	{
-		disk[i].Detach();
-		scsi.file[i] = 0;
-	}
-	imagesize = 0;
-	baselba = INVALID_BASELBA;
-	scanNeeded = true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1135,7 +1188,7 @@ void PiCMDHD::Update()
 	}
 
 	// The RTC tick and the virtual button countdown used to live here, one
-	// decrement each per emulated CPU cycle. They are now in SlowTick below:
+	// decrement each per emulated CPU cycle. They are now in SlowTick above:
 	// both have periods measured in hundreds of thousands of cycles, so a
 	// quarter of a millisecond of granularity is nothing, and two decrements
 	// out of the hot path is real.

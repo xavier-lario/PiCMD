@@ -19,6 +19,7 @@
 #ifndef FileBrowser_H
 #define FileBrowser_H
 #include <assert.h>
+#include <string.h>
 #include "ff.h"
 #include <vector>
 #include "types.h"
@@ -152,8 +153,15 @@ public:
 
 		struct Entry
 		{
+			// Both FILINFOs get cleared, not just caddyIndex. f_readdir fills
+			// them in completely, but the synthetic entries - "..", the device
+			// list - are built by hand and only ever OR AM_DIR into fattrib,
+			// so anything else left on the stack stayed set. A stray AM_RDO
+			// makes an entry render as read only and be treated that way.
 			Entry() : caddyIndex(-1)
 			{
+				memset(&filImage, 0, sizeof(filImage));
+				memset(&filIcon, 0, sizeof(filIcon));
 			}
 			FILINFO filImage;
 			FILINFO filIcon;
@@ -195,6 +203,16 @@ public:
 
 	bool SelectionsMade() { return selectionsMade; }
 	const char* LastSelectionName() { return lastSelectionName; }
+	void SetLastSelectionName(const char* name)
+	{
+		if (!name)
+		{
+			lastSelectionName[0] = 0;
+			return;
+		}
+		strncpy(lastSelectionName, name, sizeof(lastSelectionName) - 1);
+		lastSelectionName[sizeof(lastSelectionName) - 1] = 0;
+	}
 	void ClearSelections();
 
 	// DHD images are streamed from the SD card rather than loaded into RAM,
@@ -242,7 +260,12 @@ private:
 	bool selectionsMade;
 	char selectedDHDPath[512];
 	bool selectedDHDReadOnly;
-	const char* lastSelectionName;
+	// Owned, not borrowed. This used to point straight at a FILINFO inside
+	// folder.entries, which is only safe while nothing refreshes or reallocates
+	// that vector between the selection and the read of it. Nothing does today,
+	// but it is a dangling pointer waiting for someone to add a refresh, and a
+	// copy costs one buffer.
+	char lastSelectionName[_MAX_LFN + 1];
 	const char* romName;
 	bool displayPNGIcons;
 	bool buttonChangedROMDevice;

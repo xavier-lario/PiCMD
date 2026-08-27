@@ -275,12 +275,35 @@ void InitialiseLCD()
 		if (i2cLcdModel == LCD_1306_128x32)
 			height = 32;
 		screenLCD = new ScreenLCD();
-		screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar);
+		// new is noexcept in this build and returns malloc's result, so it can
+		// hand back null instead of throwing.
+		if (!screenLCD || !screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar))
+		{
+			// No panel. Everything downstream tests screenLCD for null and
+			// carries on without one, so this costs the display and nothing
+			// else - which beats dying on the first PrintText.
+			DEBUG_LOG("LCD: could not open display, continuing without it\r\n");
+			delete screenLCD;
+			screenLCD = 0;
+			return;
+		}
 		screenLCD->SetContrast(i2cLcdOnContrast);
 		screenLCD->ClearInit(0); // sh1106 needs this
 
 		bool logo_done = false;
-		if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
+		if ((height == 64) && (strcasecmp(options.GetLcdLogoName(), "cmd") == 0))
+		{
+			// No version string over this one, unlike the 1541ii logo. The
+			// artwork occupies rows 9-53 and PlotCharacter replaces whole
+			// character cells rather than compositing into them, so a line of
+			// the 8x16 font at row 0 covers rows 0-15 and takes the top off
+			// the mark. The only blank band is rows 56-63, which is half a
+			// character too short. The version is on the HDMI splash and in
+			// the no-logo fallback below.
+			screenLCD->PlotRawImage(logo_ssd_cmd, 0, 0, width, height);
+			logo_done = true;
+		}
+		else if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
 		{
 			screenLCD->PlotRawImage(logo_ssd_1541ii, 0, 0, width, height);
 			snprintf(tempBuffer, tempBufferSize, "Pi-CMD V%d.%02d", versionMajor, versionMinor);
@@ -451,6 +474,16 @@ static void UpdateLCDLamps(void)
 		// four row display that is the status line underneath - which is worth
 		// more than the extra character each label would gain.
 		lampRows = 3;
+
+		// Blank the block before drawing it. Three five column fields reach
+		// column 14 of 16, and the last row carries GEOS alone, so the columns
+		// no label writes keep the browser or logo pixels that were there when
+		// emulation started - and nothing else ever clears them, because this
+		// function returns early whenever the lamp state is unchanged.
+		snprintf(tempBuffer, tempBufferSize, "%-16s", "");
+		for (u32 row = 0; row < lampRows; ++row)
+			screenLCD->PrintText(false, 0, row * fontHeight, tempBuffer, 0, 0);
+
 		for (int i = 0; i < numLamps; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-5s", wide[i]);
@@ -462,6 +495,14 @@ static void UpdateLCDLamps(void)
 	{
 		// Only room for a couple of rows: four short tags each, so seven fit
 		lampRows = 2;
+
+		// The second row carries only three tags and so stops at column 11 of
+		// 16; blank both rows first or whatever the browser or the logo left in
+		// the columns beyond it stays there for the whole emulation.
+		snprintf(tempBuffer, tempBufferSize, "%-16s", "");
+		for (u32 row = 0; row < lampRows; ++row)
+			screenLCD->PrintText(false, 0, row * fontHeight, tempBuffer, 0, 0);
+
 		for (int i = 0; i < numLamps; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
@@ -502,6 +543,7 @@ void UpdateScreen()
 
 	u32 oldTrack = 0;
 	u8 oldLamps = 0xff;
+	u32 oldWriteErrors = 0;
 	u32 textColour = COLOUR_BLACK;
 	u32 bgColour = COLOUR_WHITE;
 	u32 oldTemperature = 0;
@@ -574,16 +616,25 @@ void UpdateScreen()
 		if (emulating == EMULATING_CMDHD)
 		{
 			u8 lamps = piCMDHD.LEDs;
-			if (lamps != oldLamps)
+			// The write error count belongs on this line too. A failed flush
+			// means data the computer was told had landed did not, and until
+			// now the only trace of that was a debug log nobody reads - the
+			// count existed and was displayed nowhere. It is sticky on
+			// purpose: this is the one number worth noticing after the fact.
+			u32 writeErrors = ScsiImage::WriteErrorCount();
+
+			if (lamps != oldLamps || writeErrors != oldWriteErrors)
 			{
 				oldLamps = lamps;
-				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s",
+				oldWriteErrors = writeErrors;
+				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s %s",
 					piCMDHD.IsActivityLEDOn() ? "ACT" : "   ",
 					piCMDHD.IsErrorLEDOn() ? "ERR" : "   ",
 					piCMDHD.IsSwap8LEDOn() ? "SW8" : "   ",
 					piCMDHD.IsSwap9LEDOn() ? "SW9" : "   ",
 					piCMDHD.IsWriteProtectLEDOn() ? "WP" : "  ",
-					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ");
+					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ",
+					writeErrors ? "WRITE FAIL" : "          ");
 				screen.PrintText(false, 0, y - screen.GetFontHeight(), tempBuffer, textColour, bgColour);
 			}
 		}
@@ -1018,6 +1069,27 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	unsigned ctAfter = 0;
 	int resetCount = 0;
 
+	// Everything in the emulation loop that does not need a microsecond cadence
+	// runs once every SLOW_TICK_EVERY passes instead; see the note beside the
+	// gate in the loop below for what that is worth.
+	static const u32 SLOW_TICK_EVERY = 256;
+	u32 slowTick = 0;
+
+	// Idle flush state, counted in slow tick visits rather than loop passes,
+	// because the poll that spends it lives inside the slow tick: one look
+	// every 256us, not one every microsecond.
+	//
+	// Locals rather than statics: they used to persist across calls, so a
+	// failing image that had backed the retry off to half a minute handed that
+	// delay to whatever was mounted next - and a healthy image would then sit
+	// on acknowledged writes for thirty seconds before its first flush, for a
+	// fault that was not its own.
+	static const u32 FLUSH_IDLE_VISITS = 500000 / SLOW_TICK_EVERY;		// ~0.5s
+	static const u32 FLUSH_MAX_VISITS = 32000000 / SLOW_TICK_EVERY;		// ~32s
+	u32 lastAccessCount = 0;
+	u32 quietVisits = 0;
+	u32 flushAfterVisits = FLUSH_IDLE_VISITS;
+
 	unsigned buttonSwap8 = options.GetCMDHDButtonSwap8();
 	unsigned buttonSwap9 = options.GetCMDHDButtonSwap9();
 	unsigned buttonWP = options.GetCMDHDButtonWP();
@@ -1045,10 +1117,6 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 #else
 	ctBefore = read32(ARM_SYSTIMER_CLO);
 #endif
-
-	// See the note beside the slow-tick gate in the loop below.
-	static const u32 SLOW_TICK_EVERY = 256;
-	u32 slowTick = 0;
 
 	// Turn on the ARM cycle counter: E|P|C set, D clear so it counts every
 	// cycle rather than every 64th, then enable PMCCNTR itself (bit 31).
@@ -1207,41 +1275,68 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		piCMDHD.SlowTick(SLOW_TICK_EVERY * 2);
 
 		{
-			static u32 lastAccessCount = 0;
-			static u32 quietLoops = 0;
 			u32 accessCount = ScsiImage::AccessCounter();
 			if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
 			{
 				lastAccessCount = accessCount;
-				quietLoops = 0;
+				quietVisits = 0;
 			}
-			else if (++quietLoops >= 500000 / SLOW_TICK_EVERY)	// scaled: this block now runs at 1MHz/SLOW_TICK_EVERY
+			else if (++quietVisits >= flushAfterVisits)
 			{
-				// Drain the backlog a chunk at a time while the quiet lasts.
+				// Idle window - safe to touch the card. Drain the backlog a chunk
+				// at a time while the quiet lasts.
 				//
 				// Unbounded, this wrote everything owed inside a single loop
 				// iteration with the emulated CPU frozen throughout: 48
 				// milliseconds in one go after a GEOS installation, the worst
-				// overrun in PICMD-LST37.LOG.
+				// overrun in PICMD-LST37.LOG. One chunk per visit turns that into
+				// a run of short freezes with the loop and the bus alive between
+				// them.
 				//
-				// Now it writes one chunk per visit and says which of three
-				// things happened, because they want different answers. More
-				// to do: hold the counter at the threshold so the next slow
-				// tick, 256us away, carries straight on - a long backlog still
-				// clears promptly, but as a run of short freezes with the loop
-				// and the bus alive in between. Stopped, whether because the
-				// computer wants the drive again or because a write failed:
-				// go back to waiting the full half second. Retrying a failed
-				// write every 256us buys nothing, since FatFS latches the
-				// error and the retry never reaches the card.
-				if (ScsiImage::FlushIdle(BusWantsTheDrive) == ScsiImage::FLUSH_MORE)
-					quietLoops = 500000 / SLOW_TICK_EVERY;
+				// FlushIdle folds "the computer wants the drive back" and "the
+				// card refused the data" into one FLUSH_STOPPED, and those want
+				// opposite answers, so the failure count decides between them.
+				u32 errorsBefore = ScsiImage::WriteErrorCount();
+				ScsiImage::FlushResult flushed = ScsiImage::FlushIdle(BusWantsTheDrive);
+				bool writeFailed = (ScsiImage::WriteErrorCount() != errorsBefore);
+
+				if (writeFailed)
+				{
+					// Back off when the card will not take the data. One that is
+					// full or failing fails every time, and each attempt freezes
+					// the emulated CPU for as long as the access takes, so the
+					// drive drops off the bus over and over for a write that is
+					// never going to land. Doubling out to half a minute keeps the
+					// retries going without making the fault worse than the
+					// original problem. FatFS latches the error anyway, so a fast
+					// retry does not even reach the card.
+					flushAfterVisits <<= 1;
+					if (flushAfterVisits > FLUSH_MAX_VISITS)
+						flushAfterVisits = FLUSH_MAX_VISITS;
+					quietVisits = 0;
+				}
+				else if (flushed == ScsiImage::FLUSH_MORE)
+				{
+					// More owed and the card is taking it: hold the counter at the
+					// threshold so the next slow tick, 256us away, carries straight
+					// on and a long backlog still clears promptly.
+					flushAfterVisits = FLUSH_IDLE_VISITS;
+					quietVisits = flushAfterVisits;
+				}
 				else
-					quietLoops = 0;
+				{
+					// Nothing left owed, or the computer wants the drive again.
+					// Either way wait out another quiet window before looking. A
+					// stop for the bus did no writing at all, so it says nothing
+					// about the card and leaves any backoff where it stands.
+					if (flushed == ScsiImage::FLUSH_DONE)
+						flushAfterVisits = FLUSH_IDLE_VISITS;
+					quietVisits = 0;
+				}
 			}
 		}
 
-		IEC_Bus::ReadGPIOUserInput(SLOW_TICK_EVERY);
+		IEC_Bus::ReadGPIOUserInput();
 
 		// SWAP 8, SWAP 9 and WRITE PROTECT are momentary, just like the real
 		// front panel; HDOS samples them and decides what they mean.
@@ -1413,6 +1508,21 @@ void emulator()
 
 			while (emulating == IEC_COMMANDS)
 			{
+				// Refresh button/GPIO state every iteration. Without this the
+				// file browser's buttons only reflect whatever
+				// WaitForClearButtons() last polled right before this loop
+				// was entered, and never update again - so after returning
+				// from CMD HD emulation (or any other exit path), the disk
+				// selection screen looks normal but nothing responds to
+				// button presses.
+				//
+				// Upstream Pi1541 got this for free: its browse loop called
+				// SimulateIECUpdate(), and iec_commands.cpp called
+				// ReadBrowseMode() from half a dozen places. Removing browse
+				// mode took the GPIO refresh with it, which is why the loss
+				// was not obvious in review.
+				IEC_Bus::ReadBrowseMode();
+
 				fileBrowser->Update();
 				if (fileBrowser->SelectionsMade())
 					emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
@@ -1516,7 +1626,12 @@ static void DisplayLogo()
 	int channels_in_file;
 	stbi_uc* image = stbi_load_from_memory((stbi_uc const*)I__logo_png, I__logo_png_size, &w, &h, &channels_in_file, 0);
 
-	screen.PlotImage((u32*)image, 0, 0, w, h);
+	// A failed decode returns null, and PlotImage would walk it.
+	if (image)
+	{
+		screen.PlotImage((u32*)image, 0, 0, w, h);
+		stbi_image_free(image);
+	}
 
 	snprintf(tempBuffer, tempBufferSize, "V%d.%02d", versionMajor, versionMinor);
 	screen.PrintText(false, 20, 180, tempBuffer, FileBrowser::Colour(VIC2_COLOUR_INDEX_BLUE));
@@ -1531,11 +1646,20 @@ static void LoadOptions()
 	res = f_open(&fp, "options.txt", FA_READ);
 	if (res == FR_OK)
 	{
-		u32 bytesRead;
+		u32 bytesRead = 0;
 		SetACTLed(true);
-		f_read(&fp, s_u8Memory, sizeof(s_u8Memory), &bytesRead);
+		FRESULT readRes = f_read(&fp, s_u8Memory, sizeof(s_u8Memory) - 1, &bytesRead);
 		SetACTLed(false);
 		f_close(&fp);
+
+		if (readRes != FR_OK)
+			return;
+
+		// Process walks this as a C string. The read used to be allowed to
+		// fill the buffer completely, leaving nothing to terminate it, so a
+		// large enough options.txt sent the parser off the end into whatever
+		// follows. One byte held back and a terminator written costs nothing.
+		s_u8Memory[bytesRead] = 0;
 
 		options.Process((char*)s_u8Memory);
 
@@ -1742,7 +1866,37 @@ void UpdateFirmwareToSD()
 		{
 			f_chdir("\\");
 
-			bool found = f_findfirst(&dir, &filInfo, ".", firmwareName) == FR_OK;
+			// f_findfirst returns FR_OK when there is no match too, leaving
+			// fname empty and the rest of filInfo untouched - so testing the
+			// result alone let a missing kernel.img through and handed an
+			// uninitialised fsize to malloc.
+			bool found = (f_findfirst(&dir, &filInfo, ".", firmwareName) == FR_OK) &&
+				(filInfo.fname[0] != 0);
+			f_closedir(&dir);
+
+			// Sanity check the size before going anywhere near the working
+			// kernel. Nothing here validated the source at all, so a truncated
+			// or one byte kernel.img on the stick read fine, wrote fine, and
+			// replaced a bootable machine with an unbootable one - the exact
+			// outcome the temporary-file dance was added to prevent. There is
+			// no header to check (a kernel image is raw ARM code from byte
+			// zero), but a real one is a few hundred KB, so a floor well below
+			// any genuine build and a ceiling well above one rejects the
+			// obviously wrong without guessing at content.
+			// Compared at FSIZE_t's own width, before any cast. exFAT is
+			// enabled in ffconf.h, so fsize is 64 bit - and casting first
+			// meant a file of 4GiB plus something plausible wrapped straight
+			// into the accepted range, after which only that low prefix was
+			// read and installed as the kernel.
+			static const FSIZE_t FIRMWARE_MIN_SIZE = 64 * 1024;
+			static const FSIZE_t FIRMWARE_MAX_SIZE = 8 * 1024 * 1024;
+
+			if (found && (filInfo.fsize < FIRMWARE_MIN_SIZE || filInfo.fsize > FIRMWARE_MAX_SIZE))
+			{
+				DEBUG_LOG("firmware: %s on USB is %llu bytes, not a plausible kernel - ignoring\r\n",
+					firmwareName, (unsigned long long)filInfo.fsize);
+				found = false;
+			}
 
 			if (found)
 			{
@@ -1769,32 +1923,48 @@ void UpdateFirmwareToSD()
 							{
 								if (f_chdir("\\") == FR_OK)
 								{
-									bool same = true;
-									if (FR_OK == f_open(&fp, firmwareName, FA_READ))
+									// Compare sizes before contents. The old loop read fixed 256
+									// byte blocks with the result ignored, which went wrong three
+									// ways: a shorter file on the card hit EOF, returned zero
+									// bytes, never advanced the index and span forever; a size
+									// that is not a multiple of 256 read past the end of the USB
+									// image; and a longer file with the same leading bytes
+									// counted as identical.
+									bool same = false;
+									FILINFO sdInfo;
+									if (f_stat(firmwareName, &sdInfo) == FR_OK &&
+										(u32)sdInfo.fsize == (u32)filInfo.fsize)
 									{
-										char* ptr = mem;
-										char buffer[256];
-										unsigned bufferIndex = 0;
-										unsigned bytesRead;
-										do
+										if (FR_OK == f_open(&fp, firmwareName, FA_READ))
 										{
-											f_read(&fp, buffer, 256, &bytesRead);
-
-											for (unsigned index = 0; index < bytesRead; ++index)
+											char buffer[256];
+											u32 offset = 0;
+											same = true;
+											while (same && offset < (u32)filInfo.fsize)
 											{
-												if (buffer[index] != mem[bufferIndex + index])
+												unsigned want = (u32)filInfo.fsize - offset;
+												if (want > sizeof(buffer))
+													want = sizeof(buffer);
+
+												unsigned bytesRead = 0;
+												if (f_read(&fp, buffer, want, &bytesRead) != FR_OK || bytesRead != want)
 												{
+													// Could not read it all, so we do not know it matches.
 													same = false;
 													break;
 												}
+
+												if (memcmp(buffer, mem + offset, want) != 0)
+													same = false;
+
+												offset += want;
 											}
-											bufferIndex += bytesRead;
-										} while (same && (bufferIndex < (u32)filInfo.fsize));
-										f_close(&fp);
+											f_close(&fp);
+										}
 									}
 
 									screen.Clear(COLOUR_BLACK);
-									if (!same && (FR_OK == f_open(&fp, firmwareName, FA_CREATE_ALWAYS | FA_WRITE)))
+									if (!same)
 									{
 										snprintf(tempBuffer, tempBufferSize, "Updating firmware.\r\n");
 										screen.MeasureText(false, tempBuffer, &widthText, &heightText);
@@ -1802,8 +1972,72 @@ void UpdateFirmwareToSD()
 										ypos = (heightScreen - heightText) >> 1;
 										screen.PrintText(false, xpos, ypos, tempBuffer, COLOUR_WHITE, COLOUR_RED);
 
-										res = f_write(&fp, mem, (u32)filInfo.fsize, &bytes);
-										f_close(&fp);
+										// Write a temporary file and only put it in place once it
+										// is known to be complete. FA_CREATE_ALWAYS on kernel.img
+										// destroyed the working kernel before the replacement
+										// existed, so a full or failing card left the machine with
+										// a truncated image and nothing to boot. The write and the
+										// close were both unchecked as well.
+										const char* tempName = "kernel.new";
+										bool written = false;
+
+										if (FR_OK == f_open(&fp, tempName, FA_CREATE_ALWAYS | FA_WRITE))
+										{
+											bytes = 0;
+											FRESULT wres = f_write(&fp, mem, (u32)filInfo.fsize, &bytes);
+											FRESULT cres = f_close(&fp);
+											written = (wres == FR_OK) && (cres == FR_OK) && (bytes == (u32)filInfo.fsize);
+										}
+
+										// Keep the old kernel until the new one is in
+										// place. Deleting it first and then renaming
+										// left nothing at all if the rename failed -
+										// and the error path deleted the replacement
+										// too, so a failure there was still an
+										// unbootable card. Moving it aside instead
+										// means the worst case is a machine that
+										// needs kernel.bak renamed back by hand.
+										const char* backupName = "kernel.bak";
+										bool updated = false;
+
+										if (written)
+										{
+											f_unlink(backupName);		// clear any stale backup
+
+											if (f_rename(firmwareName, backupName) == FR_OK)
+											{
+												if (f_rename(tempName, firmwareName) == FR_OK)
+												{
+													// Keep kernel.bak rather than
+													// deleting it. It costs one
+													// kernel of card space and is
+													// the only way back if the new
+													// image turns out not to boot -
+													// at which point there is no
+													// working machine to fix it
+													// from. The next update
+													// replaces it.
+													updated = true;
+												}
+												else
+												{
+													// Put the working kernel back.
+													f_rename(backupName, firmwareName);
+												}
+											}
+										}
+
+										if (updated)
+										{
+											DEBUG_LOG("firmware: updated %s\r\n", firmwareName);
+										}
+										else
+										{
+											f_unlink(tempName);
+											DEBUG_LOG("firmware: update failed, keeping the existing kernel\r\n");
+											snprintf(tempBuffer, tempBufferSize, "Firmware update FAILED.\r\n");
+											screen.PrintText(false, xpos, ypos, tempBuffer, COLOUR_WHITE, COLOUR_RED);
+										}
 									}
 								}
 							}

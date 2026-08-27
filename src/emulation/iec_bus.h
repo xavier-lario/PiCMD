@@ -309,13 +309,22 @@ public:
 			// This means that when any pin is turn to output it will output a 0 and pull lines low (ie an activation state on the IEC bus)
 			// Note: on the IEC bus you never output a 1 you simply tri state and it will be pulled up to a 1 (ie inactive state on the IEC bus) if no one else is pulling it low.
 
-			//myOutsGPFSEL0 = read32(ARM_GPIO_GPFSEL0);
-			//myOutsGPFSEL1 = read32(ARM_GPIO_GPFSEL1);
-
-			//myOutsGPFSEL1 |= (1 << ((PIGPIO_OUT_LED - 10) * 3));
-			//myOutsGPFSEL1 |= (1 << ((PIGPIO_OUT_SOUND - 10) * 3));
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_SOUND, FS_OUTPUT);
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_LED, FS_OUTPUT);
+
+			// Take a copy of GPFSEL1 now that the pin functions are set the way
+			// this build wants them.
+			//
+			// RefreshOutsCMDHD rewrites the whole register on this wiring -
+			// that is how it drives DATA and CLOCK, by switching them between
+			// input and output - and it builds the new value from this copy.
+			// The copy was left at 0, the assignment that would have filled it
+			// in having been commented out, so every refresh wrote zeroes into
+			// the function bits of GPIO 10-19 and put SOUND (13), LED (16) and
+			// the UART pins back to input, undoing the two calls immediately
+			// above. The activity LED and the sound output had therefore never
+			// worked on non split wiring.
+			myOutsGPFSEL1 = read32(ARM_GPIO_GPFSEL1);
 		}
 		else
 		{
@@ -359,7 +368,7 @@ public:
 		{
 			InputButton[index] = false;
 			InputButtonPrev[index] = false;
-			validInputCount[index] = 0;
+			buttonPressed[index] = false;
 			inputRepeatThreshold[index] = INPUT_BUTTON_REPEAT_THRESHOLD;
 			inputRepeat[index] = 0;
 			inputRepeatPrev[index] = 0;
@@ -391,15 +400,31 @@ public:
 	}
 #endif
 
-	// step is how many sampling periods this call stands for. The thresholds
-	// above are counts of samples, and were written when every caller sampled
-	// once per microsecond; a caller that samples less often passes the
-	// divisor here so that 20000 keeps meaning 20 milliseconds instead of
-	// silently becoming five seconds - which is exactly what happened to every
-	// button on the front panel the first time this loop was decimated. The
-	// equality tests become crossed-this-call tests for the same reason: a
-	// step larger than one can jump straight over a threshold.
-	static void UpdateButton(int index, unsigned gplev0, unsigned step = 1)
+	// Debounce/repeat timing here is measured in real elapsed microseconds
+	// (via ARM_SYSTIMER_CLO), not in call count. INPUT_BUTTON_DEBOUNCE_THRESHOLD
+	// and INPUT_BUTTON_REPEAT_THRESHOLD were written as raw counter increments
+	// on the assumption that this is called about once per microsecond, and by
+	// now nothing calls it that often: the emulation loop polls the front panel
+	// on its slow tick, one iteration in SLOW_TICK_EVERY, and the file browser
+	// polls slower still and not even regularly, since it does directory
+	// scanning and screen drawing in the same loop. Counting calls, a press
+	// never accumulated anywhere near 20000 of them and every button on the
+	// front panel appeared dead. Elapsed time keeps 20000 meaning 20ms and
+	// 460000 meaning 460ms whatever the caller's rate is, so no caller has to
+	// tell this function how often it runs and decimating a loop cannot break
+	// the front panel again.
+	//
+	// nowUs is passed in rather than read here so that one ARM_SYSTIMER_CLO
+	// read serves all five buttons. That read is an uncached peripheral access
+	// and blocks for about 69 cycles, so five of them would be most of the cost
+	// of a poll for no benefit. All five buttons also then share one timestamp,
+	// which is marginally more correct than five staggered reads.
+	//
+	// The subtraction below is deliberately unsigned: ARM_SYSTIMER_CLO is the
+	// low 32 bits of the 1MHz counter and wraps every ~71.6 minutes, and u32
+	// wraparound makes the elapsed time come out right across that boundary.
+	// It looks like a bug and is not - please leave it alone.
+	static void UpdateButton(int index, unsigned gplev0, u32 nowUs)
 	{
 		bool inputcurrent = (gplev0 & ButtonPinFlags[index]) == 0;
 
@@ -408,18 +433,22 @@ public:
 
 		if (inputcurrent)
 		{
-			unsigned before = validInputCount[index];
-			validInputCount[index] = before + step;
-			if (before < INPUT_BUTTON_DEBOUNCE_THRESHOLD &&
-				validInputCount[index] >= INPUT_BUTTON_DEBOUNCE_THRESHOLD)
+			if (!buttonPressed[index])
+			{
+				buttonPressed[index] = true;
+				pressStartTime[index] = nowUs;		// start of this press streak
+			}
+
+			u32 heldUs = nowUs - pressStartTime[index];
+
+			if (!InputButton[index] && heldUs >= INPUT_BUTTON_DEBOUNCE_THRESHOLD)
 			{
 				InputButton[index] = true;
 				inputRepeatThreshold[index] = INPUT_BUTTON_DEBOUNCE_THRESHOLD + INPUT_BUTTON_REPEAT_THRESHOLD;
 				inputRepeat[index]++;
 			}
 
-			if (before < inputRepeatThreshold[index] &&
-				validInputCount[index] >= inputRepeatThreshold[index])
+			if (InputButton[index] && heldUs >= inputRepeatThreshold[index])
 			{
 				inputRepeat[index]++;
 				inputRepeatThreshold[index] += INPUT_BUTTON_REPEAT_THRESHOLD / inputRepeat[index];
@@ -428,7 +457,7 @@ public:
 		else
 		{
 			InputButton[index] = false;
-			validInputCount[index] = 0;
+			buttonPressed[index] = false;
 			inputRepeatThreshold[index] = INPUT_BUTTON_REPEAT_THRESHOLD;
 			inputRepeat[index] = 0;
 			inputRepeatPrev[index] = 0;
@@ -439,7 +468,7 @@ public:
 
 
 	static void ReadBrowseMode(void);
-	static void ReadGPIOUserInput(unsigned step = 1);
+	static void ReadGPIOUserInput(void);
 	static void ReadEmulationModeCMDHD(void);
 	static void ReadBusInputsCMDHD(void);
 
@@ -461,8 +490,21 @@ public:
 	// Out going
 	static void PortB_OnPortOut(void* pUserData, unsigned char status);
 
-
-	// Refresh all outputs including SRQ (fast serial).
+	// Refresh all the outputs: DATA, CLOCK, SRQ (fast serial), the activity
+	// LED, the sound pin and ATN out.
+	//
+	// This runs once per loop and - event driven - from PortB_OnPortOut(),
+	// which calls it as soon as one of the output flags actually moves, so a
+	// CPU write to U10 ORB/DDRB reaches the wire inside the same emulated
+	// cycle instead of waiting up to ~1us for the next periodic refresh. That
+	// ~1us of slack was enough to occasionally misalign GEOS's
+	// 2-bit-per-sample turbo protocol, whose symbol gaps run only ~8-11us: a
+	// whole microsecond of latency is a large fraction of one symbol, and the
+	// receiver can sample the wrong half of a bit pair. Nearly everything below
+	// is a write to device memory, which is posted and does not stall the
+	// caller; the one exception is the read-modify-write of GPFSEL inside
+	// RefreshAtnOut, which that function skips unless AtnSetToOut has actually
+	// changed. So running this twice inside a microsecond is affordable.
 	static inline void RefreshOutsCMDHD(void)
 	{
 		unsigned set = 0;
@@ -480,16 +522,66 @@ public:
 			unsigned nValue = (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outputs;
 			write32(ARM_GPIO_GPFSEL1, nValue);
 
+			// One GPFSEL1 write moves both lines at once, so the transient the
+			// split path below has to order around cannot arise on this wiring.
 			RefreshAtnOut();
 		}
 		else
 		{
-			if (AtnaDataSetToOut || DataSetToOut) set |= 1 << PIGPIO_OUT_DATA;
-			else clear |= 1 << PIGPIO_OUT_DATA;
+			// DATA and CLOCK are kept in bus terms - asserted means "pulling
+			// the line low" - for as long as possible. Which physical level
+			// that is depends on the buffer: with an inverting one (7406,
+			// invertIECOutputs = 1) asserting drives the pin high; with a non
+			// inverting one (7407, which options.txt also documents) it drives
+			// it low. Choosing the registers from the polarity and then
+			// deciding the write order in bus terms is what keeps the ordering
+			// below correct on both, instead of only on the wiring it was
+			// developed against.
+			unsigned assertBits = 0;
+			unsigned releaseBits = 0;
 
-			if (ClockSetToOut) set |= 1 << PIGPIO_OUT_CLOCK;
-			else clear |= 1 << PIGPIO_OUT_CLOCK;
+			if (AtnaDataSetToOut || DataSetToOut) assertBits |= 1 << PIGPIO_OUT_DATA;
+			else releaseBits |= 1 << PIGPIO_OUT_DATA;
 
+			if (ClockSetToOut) assertBits |= 1 << PIGPIO_OUT_CLOCK;
+			else releaseBits |= 1 << PIGPIO_OUT_CLOCK;
+
+			u32 assertReg = invertIECOutputs ? ARM_GPIO_GPSET0 : ARM_GPIO_GPCLR0;
+			u32 releaseReg = invertIECOutputs ? ARM_GPIO_GPCLR0 : ARM_GPIO_GPSET0;
+
+			// GPSET0/GPCLR0 are two separate register writes, not one atomic
+			// change. If this call moves one line from released to asserted
+			// and the other from asserted to released at the same time,
+			// writing them in the "wrong" order leaves a few-cycle window in
+			// which the old level of one line is combined with the new level
+			// of the other - exactly the kind of transient a 2-bit-per-sample
+			// GEOS turbo read can latch as a corrupted nibble. Releasing first
+			// makes that window one where both lines are released, which no
+			// receiver reads as a symbol; asserting first would make it one
+			// where both are asserted, which is a symbol. So the order is
+			// swapped only when both changes happen together, and the original
+			// assert-then-release order stands the rest of the time.
+			bool newlyAsserted = (assertBits & ~oldAssertBits) != 0;
+			bool newlyReleased = (releaseBits & ~oldReleaseBits) != 0;
+
+			if (newlyAsserted && newlyReleased)
+			{
+				write32(releaseReg, releaseBits);
+				write32(assertReg, assertBits);
+			}
+			else
+			{
+				write32(assertReg, assertBits);
+				write32(releaseReg, releaseBits);
+			}
+
+			oldAssertBits = assertBits;
+			oldReleaseBits = releaseBits;
+
+			// SRQ is the fast serial clock rather than one of the two lines
+			// the ordering above protects, so it stays in the single set/clear
+			// pair that the LED and the sound pin already share and adds no
+			// register writes of its own.
 			if (SRQSetToOut) set |= 1 << PIGPIO_OUT_SRQ;	// fast clock is pulled high but we have an inverter in our hardware so to compensate we invert in software now
 			else clear |= 1 << PIGPIO_OUT_SRQ;
 
@@ -509,6 +601,11 @@ public:
 		write32(ARM_GPIO_GPSET0, set);
 		write32(ARM_GPIO_GPCLR0, clear);
 
+		// ATN out on this wiring too. The non split arm above does it on its
+		// way through, so either way an event driven refresh pushes ATN in the
+		// same cycle as DATA and CLOCK. It is nearly free: RefreshAtnOut only
+		// touches GPFSEL when AtnSetToOut has actually changed, which happens
+		// for about a millisecond during a SWAP and never otherwise.
 		if (splitIECLines)
 			RefreshAtnOut();
 	}
@@ -637,7 +734,14 @@ public:
 	// disables it (the drive then simply never drives ATN).
 	static inline void SetAtnOutGPIO(u32 gpio)
 	{
-		atnOutGPIO = gpio;
+		// Range check it here, once, rather than trusting options.txt.
+		// RefreshAtnOut turns this straight into a register address -
+		// ARM_GPIO_GPFSEL0 + (gpio / 10) * 4 - so a typo like 240 in the
+		// config file walks out of the GPIO bank entirely and starts
+		// read-modify-writing whatever peripheral registers happen to follow.
+		// The BCM283x has GPIO 0-53; anything else disables the function,
+		// which is what 0 already means.
+		atnOutGPIO = (gpio <= 53) ? gpio : 0;
 	}
 
 	// CA1 input ATN
@@ -658,8 +762,11 @@ public:
 	static bool OutputSound;
 
 private:
-	static u32 oldClears;
-	static u32 oldSets;
+	// Previous DATA/CLOCK state in bus terms (asserted = pulling low), not raw
+	// pin levels - see RefreshOutsCMDHD(). Only ever covers PIGPIO_OUT_DATA
+	// and PIGPIO_OUT_CLOCK; nothing else writes them.
+	static u32 oldReleaseBits;
+	static u32 oldAssertBits;
 
 	static bool splitIECLines;
 	static bool invertIECInputs;
@@ -705,10 +812,13 @@ private:
 	static u32 myOutsGPFSEL1;
 	static bool InputButton[5];
 	static bool InputButtonPrev[5];
-	static u32 validInputCount[5];
+	// True while the button reads pressed, so UpdateButton can tell the first
+	// call of a press streak (when pressStartTime is stamped) from the rest.
+	static bool buttonPressed[5];
 	static u32 inputRepeatThreshold[5];
 	static u32 inputRepeat[5];
 	static u32 inputRepeatPrev[5];
+	static u32 pressStartTime[5];
 
 };
 #endif

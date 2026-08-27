@@ -253,6 +253,12 @@ void FileBrowser::BrowsableListView::RefreshHighlightScroll()
 bool FileBrowser::BrowsableListView::CheckBrowseNavigation(bool pageOnly)
 {
 	bool dirty = false;
+	// An empty list makes size() - 1 wrap to 4294967295, and every bound
+	// below is then satisfied. A directory that failed to open, or a card
+	// pulled mid browse, is enough to get here.
+	if (list->entries.size() == 0)
+		return false;
+
 	u32 numberOfEntriesMinus1 = list->entries.size() - 1;
 
 	if (inputMappings->BrowseDown())
@@ -391,6 +397,10 @@ void FileBrowser::BrowsableList::RefreshViewsHighlightScroll()
 
 bool FileBrowser::BrowsableList::CheckBrowseNavigation()
 {
+	// See the view version above: size() - 1 wraps on an empty list.
+	if (entries.size() == 0)
+		return false;
+
 	u32 numberOfEntriesMinus1 = entries.size() - 1;
 
 	bool dirty = false;
@@ -425,9 +435,14 @@ bool FileBrowser::BrowsableList::CheckBrowseNavigation()
 
 		searchLastKeystrokeTime = 0;
 
-		searchPrefix[searchPrefixIndex] = searchChar;
+		// Store only when there is somewhere for the terminator to go. The
+		// character used to be written unconditionally, so on the last slot it
+		// overwrote the NUL while the guard below stopped a new one being
+		// added - leaving an unterminated buffer that PrintText then walked
+		// off the end of.
 		if (searchPrefixIndex < KEYBOARD_SEARCH_BUFFER_SIZE - 1)
 		{
+			searchPrefix[searchPrefixIndex] = searchChar;
 			searchPrefixIndex++;
 			searchPrefix[searchPrefixIndex] = 0;
 			dirty |= 1;
@@ -529,6 +544,7 @@ FileBrowser::FileBrowser(InputMappings* inputMappings, const char* romName, bool
 {
 	selectedDHDPath[0] = 0;
 	selectedDHDReadOnly = false;
+	lastSelectionName[0] = 0;
 
 	folder.scrollHighlightRate = scrollHighlightRate;
 
@@ -653,8 +669,20 @@ void FileBrowser::RefreshFolderEntries()
 			do
 			{
 				res = f_readdir(&dir, &entry.filImage);
-				ext = strrchr(entry.filImage.fname, '.');
-				if (res == FR_OK && entry.filImage.fname[0] != 0 && !(ext && strcasecmp(ext, ".png") == 0) && (entry.filImage.fname[0] != '.'))
+
+				// List directories, and files this drive can actually mount.
+				//
+				// Everything used to be listed except .png and dotfiles, which
+				// meant the root of a working card showed cmdhd-bootrom.bin,
+				// bootcode.bin, start.elf, fixup.dat, config.txt, options.txt
+				// and the README alongside the images. None of it was ever
+				// selectable - every selection path already requires
+				// IsDiskImageExtention - so it was noise you had to scroll
+				// past to reach the disks.
+				bool isDir = (entry.filImage.fattrib & AM_DIR) != 0;
+				bool mountable = isDir || IsDiskImageExtention(entry.filImage.fname);
+
+				if (res == FR_OK && entry.filImage.fname[0] != 0 && entry.filImage.fname[0] != '.' && mountable)
 					folder.entries.push_back(entry);
 			} while (res == FR_OK && entry.filImage.fname[0] != 0);
 			f_closedir(&dir);
@@ -675,7 +703,18 @@ void FileBrowser::RefreshFolderEntries()
 							for (unsigned index = 0; index < folder.entries.size(); ++index)
 							{
 								FileBrowser::BrowsableList::Entry* entryAtIndex = &folder.entries[index];
-								if (strncasecmp(entry.filIcon.fname, entryAtIndex->filImage.fname, length) == 0)
+
+								// Match the whole stem, not just its first
+								// characters. A prefix compare gave hd.png to
+								// hd-backup.dhd as readily as to hd.dhd, and
+								// which one ended up with it depended on the
+								// order the directory happened to enumerate in.
+								const char* imageExt = strrchr(entryAtIndex->filImage.fname, '.');
+								int imageStem = imageExt ? (int)(imageExt - entryAtIndex->filImage.fname)
+									: (int)strlen(entryAtIndex->filImage.fname);
+
+								if (imageStem == length &&
+									strncasecmp(entry.filIcon.fname, entryAtIndex->filImage.fname, length) == 0)
 									entryAtIndex->filIcon = entry.filIcon;
 							}
 						}
@@ -840,7 +879,10 @@ bool FileBrowser::CheckForPNG(const char* filename, FILINFO& filIcon)
 			// Long file names are on (_MAX_LFN is 255), so the stem can be as
 			// long as this buffer on its own. It has to leave room for ".png"
 			// and the terminator, and a name that does not is simply one we
-			// cannot have an icon for.
+			// cannot have an icon for. Trimming the stem to make it fit would
+			// be worse than having no icon: the shortened name is a name some
+			// other image on the card may well own, so the browser would show
+			// a picture of the wrong disk.
 			size_t len = (size_t)(ptr - filename);
 			if (len + sizeof(".png") <= sizeof(fileName))
 			{
@@ -868,30 +910,44 @@ void FileBrowser::DisplayPNG(FILINFO& filIcon, int x, int y)
 			char* PNG = (char*)malloc(filIcon.fsize);
 			if (PNG)
 			{
-				u32 bytesRead;
+				u32 bytesRead = 0;
 				SetACTLed(true);
-				f_read(&fp, PNG, filIcon.fsize, &bytesRead);
+				FRESULT readRes = f_read(&fp, PNG, filIcon.fsize, &bytesRead);
 				SetACTLed(false);
-				f_close(&fp);
 
-				int w;
-				int h;
-				int channels_in_file;
-				stbi_uc* image = stbi_load_from_memory((stbi_uc const*)PNG, bytesRead, &w, &h, &channels_in_file, 4);
+				if (readRes == FR_OK)
+				{
+					int w;
+					int h;
+					int channels_in_file;
+					stbi_uc* image = stbi_load_from_memory((stbi_uc const*)PNG, bytesRead, &w, &h, &channels_in_file, 4);
 #if not defined(EXPERIMENTALZERO)
 
-				if (image && (w == PNG_WIDTH && h == PNG_HEIGHT))
-				{
-					//DEBUG_LOG("Opened PNG %s w = %d h = %d cif = %d\r\n", fileName, w, h, channels_in_file);
-					screenMain->PlotImage((u32*)image, x, y, w, h);
-				}
-				else
-				{
-					//DEBUG_LOG("Invalid PNG size %d x %d\r\n", w, h);
-				}
+					if (image && (w == PNG_WIDTH && h == PNG_HEIGHT))
+					{
+						//DEBUG_LOG("Opened PNG %s w = %d h = %d cif = %d\r\n", fileName, w, h, channels_in_file);
+						screenMain->PlotImage((u32*)image, x, y, w, h);
+					}
+					else
+					{
+						//DEBUG_LOG("Invalid PNG size %d x %d\r\n", w, h);
+					}
 #endif
+					// stb allocates the decoded image and hands ownership over.
+					// This was never released, so every icon drawn - and they
+					// are redrawn as the highlight moves - leaked 320x200x4,
+					// a quarter megabyte a time, out of a heap that is never
+					// coming back on a bare metal machine.
+					if (image)
+						stbi_image_free(image);
+				}
+
 				free(PNG);
 			}
+
+			// Outside the malloc check: an allocation failure used to leave
+			// the file open, and FatFS only has so many handles.
+			f_close(&fp);
 		}
 	}
 	else
@@ -961,8 +1017,9 @@ void FileBrowser::PopFolder()
 			unsigned found = 0;
 			if (last_ptr)
 			{
-				u32 numberOfEntriesMinus1 = folder.entries.size() - 1;
-				for (unsigned i = 0; i <= numberOfEntriesMinus1; i++)
+				// Counted with < size() rather than <= size() - 1: the old form
+				// looped four billion times over an empty folder.
+				for (unsigned i = 0; i < folder.entries.size(); i++)
 				{
 					FileBrowser::BrowsableList::Entry* entry = &folder.entries[i];
 					if (strcmp(last_ptr, entry->filImage.fname) == 0)
@@ -1100,7 +1157,10 @@ void FileBrowser::DisplayDHDInfo(const char* imagePath, u32 sizeInSectors, const
 	{
 		RGBA BkColour = RGBA(0, 0, 0, 0xFF);
 		screenLCD->Clear(BkColour);
-		screenLCD->PrintText(false, 0, 0, (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
+		// Belt and braces: callers should always pass a name, but this is the
+		// one place a stray pointer would be walked as a string.
+		if (filenameForIcon)
+			screenLCD->PrintText(false, 0, 0, (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
 		screenLCD->SwapBuffers();
 	}
 }
@@ -1124,7 +1184,8 @@ bool FileBrowser::AddToCaddy(FileBrowser::BrowsableList::Entry* current)
 		for (unsigned i = 0; i < folder.entries.size(); ++i)
 			ret |= AddImageToCaddy(&folder.entries[i]);
 
-		folder.currentIndex = folder.entries.size() - 1;
+		// Nothing was added if the folder is empty; size() - 1 would wrap.
+		folder.currentIndex = folder.entries.size() ? folder.entries.size() - 1 : 0;
 		folder.SetCurrent();
 
 		RefeshDisplay();
@@ -1216,7 +1277,7 @@ void FileBrowser::UpdateInputFolders()
 					selectionsMade = FillCaddyWithSelections();
 
 					if (selectionsMade)
-						lastSelectionName = current->filImage.fname;
+						SetLastSelectionName(current->filImage.fname);
 
 					dirty = true;
 				}
@@ -1357,6 +1418,11 @@ void FileBrowser::SelectAutoMountImage(const char* image)
 	{
 		ClearSelections();
 		caddySelections.entries.push_back(*current);
+		// Has to be set here as well as on the manual path: this makes
+		// selectionsMade true, and the browser loop then hands
+		// LastSelectionName() to BeginEmulating for the icon lookup. Without
+		// it that pointer was whatever the member happened to contain.
+		SetLastSelectionName(current->filImage.fname);
 		selectionsMade = FillCaddyWithSelections();
 	}
 }

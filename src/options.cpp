@@ -25,9 +25,14 @@
 
 #define INVALID_VALUE	((unsigned) -1)
 
-// strncpy leaves the destination unterminated when the source fills it. The
-// string options all copy into 256 byte members, and only survived that by
-// accident: Options is a global, so .bss had already zeroed the last byte.
+// Copy an option value into a fixed buffer, terminated.
+//
+// Every one of these was "strncpy(dest, pValue, 255)" into a char[256], which
+// writes no terminator at all when the value is 255 characters or longer -
+// strncpy only copies a terminator if it finds one inside the count. Byte 255
+// then held whatever was there before, and the result was handed to f_open,
+// strcasecmp and PrintText as if it were a string. It only ever survived that
+// by accident: Options is a global, so .bss had already zeroed the last byte.
 static void CopyStringOption(char* dest, size_t size, const char* value)
 {
 	strncpy(dest, value, size - 1);
@@ -153,6 +158,13 @@ Options::Options(void)
 	, i2cScan(0)
 	, i2cLcdFlip(0)
 	, i2cLcdOnContrast(127)
+	// Both of these are read whether or not options.txt mentions them - the
+	// dim timer runs against i2cLcdDimTime on every pass - and neither was in
+	// this list, so they started as whatever was on the stack. Dimming to an
+	// arbitrary contrast after an arbitrary delay is a confusing thing for a
+	// display to do. 0 disables it, which is the old documented default.
+	, i2cLcdDimContrast(0)
+	, i2cLcdDimTime(0)
 	, i2cLcdUseCBMChar(0)
 	, i2cLcdModel(LCD_UNKNOWN)
 	, scrollHighlightRate(0.125f)
@@ -170,8 +182,12 @@ Options::Options(void)
 {
 	autoMountImageName[0] = 0;
 	strcpy(ROMFontName, "chargen");
-	strcpy(LcdLogoName, "1541ii");
+	strcpy(LcdLogoName, "cmd");
 	ROMNameCMDHD[0] = 0;
+	// GetLCDName is called whether or not options.txt sets LCDName, and it was
+	// left uninitialised - so with no LCDName line it returned a pointer into
+	// 256 bytes of stack leftovers with no terminator guaranteed.
+	LCDName[0] = 0;
 }
 
 #define ELSE_CHECK_DECIMAL_OPTION(Name) \
@@ -199,11 +215,15 @@ void Options::Process(char* buffer)
 		/*char* equals = */GetToken();
 		char* pValue = GetToken();
 
-		// A name with no value at the end of the file. Every branch below reads
-		// it, and strcasecmp/strncpy on a null pointer would take the Pi down
-		// before it ever showed the boot screen.
-		if (pValue == 0)
-			break;
+		// GetToken returns 0 at the end of the buffer, so a name with no value
+		// - a truncated file, or a trailing "Font =" - leaves pValue null. The
+		// decimal and float macros would survive that, because GetDecimal and
+		// GetFloat null-check, but strcasecmp and the string copies below go
+		// straight at the pointer and took the Pi down at boot, before there was
+		// anything on screen to say why. An option with no value is simply
+		// skipped; the next GetToken then ends the loop.
+		if (!pValue)
+			continue;
 
 		if ((strcasecmp(pOption, "Font") == 0) || (strcasecmp(pOption, "ChargenFont") == 0))
 		{

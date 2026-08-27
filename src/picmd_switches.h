@@ -12,9 +12,12 @@
 // deletion wearing a switch's clothes. types.h is included by everything, so
 // this is the one place they cannot go wrong.
 //
-// After changing any of these: touch the .cpp files or build clean. The
-// Makefile tracks no header dependencies, so editing a header alone relinks
-// the previous objects and produces a kernel that does not contain the change.
+// Changing any of these is picked up on the next build without any help: the
+// Makefile records each object's header dependencies (-MMD -MP), and these
+// reach every translation unit through types.h. It was not always so - editing
+// a header alone used to relink the previous objects, so a kernel could be
+// built, flashed and measured without the switch that was supposedly under
+// test ever having been compiled in.
 
 #ifndef PICMD_SWITCHES_H
 #define PICMD_SWITCHES_H

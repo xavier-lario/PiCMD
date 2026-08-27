@@ -1,5 +1,6 @@
 *.o
 *.a
+*.d
 *.elf
 *.img
 *.lst
@@ -8,6 +9,14 @@
 
 # Build output
 target/
+
+# Host test binary
+tests/run_tests
+tests/run_tests.exe
+
+# Per-developer tool settings. The shared .claude/settings.json, if one is
+# ever added, is worth committing; this one holds one person's local choices.
+.claude/settings.local.json
 
 # ...but the Raspberry Pi firmware kept for building SD cards is not a build
 # artifact, despite matching the patterns above.

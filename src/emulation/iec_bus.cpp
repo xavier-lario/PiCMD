@@ -23,8 +23,8 @@
 
 int IEC_Bus::buttonCount = sizeof(ButtonPinFlags) / sizeof(unsigned);
 
-u32 IEC_Bus::oldClears = 0;
-u32 IEC_Bus::oldSets = 0;
+u32 IEC_Bus::oldReleaseBits = 0;
+u32 IEC_Bus::oldAssertBits = 0;
 u32 IEC_Bus::PIGPIO_MASK_IN_ATN = 1 << PIGPIO_ATN;
 u32 IEC_Bus::PIGPIO_MASK_IN_DATA = 1 << PIGPIO_DATA;
 u32 IEC_Bus::PIGPIO_MASK_IN_CLOCK = 1 << PIGPIO_CLOCK;
@@ -68,21 +68,27 @@ u32 IEC_Bus::myOutsGPFSEL1 = 0;
 u32 IEC_Bus::myOutsGPFSEL0 = 0;
 bool IEC_Bus::InputButton[5] = { 0 };
 bool IEC_Bus::InputButtonPrev[5] = { 0 };
-u32 IEC_Bus::validInputCount[5] = { 0 };
+bool IEC_Bus::buttonPressed[5] = { 0 };
 u32 IEC_Bus::inputRepeatThreshold[5];
 u32 IEC_Bus::inputRepeat[5] = { 0 };
 u32 IEC_Bus::inputRepeatPrev[5] = { 0 };
+u32 IEC_Bus::pressStartTime[5] = { 0 };
 
 
 u32 IEC_Bus::emulationModeCheckButtonIndex = 0;
 
 unsigned IEC_Bus::gplev0;
 
-void IEC_Bus::ReadGPIOUserInput(unsigned step)
+void IEC_Bus::ReadGPIOUserInput(void)
 {
+	// One timer read for all the buttons - see UpdateButton's comment. A
+	// peripheral read blocks for about 69 cycles, so five of them would be most
+	// of what this poll costs, for no benefit.
+	u32 nowUs = read32(ARM_SYSTIMER_CLO);
+
 	for (int index = 0; index < buttonCount; ++index)
 	{
-		UpdateButton(index, gplev0, step);
+		UpdateButton(index, gplev0, nowUs);
 	}
 }
 
@@ -429,6 +435,14 @@ void IEC_Bus::Reset(void)
 
 	if (AtnaDataSetToOut) PI_Data = true;
 #endif
+
+	// Bring the snapshot the mid-loop sample guards on back into line with the
+	// flags above; see ReadBusInputsCMDHD. Left holding the previous session's
+	// state, the first mid-loop samples after a reset would go on refusing to
+	// sense a line that nothing is pulling low any more.
+	sampledDataSetToOut = DataSetToOut;
+	sampledAtnaDataSetToOut = AtnaDataSetToOut;
+	sampledClockSetToOut = ClockSetToOut;
 
 	RefreshOutsCMDHD();
 }

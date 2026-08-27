@@ -20,10 +20,10 @@ ifeq ($(strip $(RASPPI)),0)
 	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access -DRPIZERO=1 -DEXPERIMENTALZERO=1
 	CFLAGS	+= -DRPIZERO=1 -DRASPPI=1
 else ifeq ($(strip $(RASPPI)),1BRev1)
-	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access-DRPI1BREV1=1 -DEXPERIMENTALZERO=1
+	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access -DRPI1BREV1=1 -DEXPERIMENTALZERO=1
 	CFLAGS	+= -DRPI1BREV1=1 -DRASPPI=1
 else ifeq ($(strip $(RASPPI)),1BRev2)
-	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access-DRPI1BREV2=1 -DEXPERIMENTALZERO=1
+	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access -DRPI1BREV2=1 -DEXPERIMENTALZERO=1
 	CFLAGS	+= -DRPI1BREV2=1 -DRASPPI=1
 else ifeq ($(strip $(RASPPI)),1BPlus)
 	ARCH	?= -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -mno-unaligned-access -DRPI1BPLUS=1 -DEXPERIMENTALZERO=1
@@ -35,13 +35,32 @@ else ifeq ($(strip $(RASPPI)),3)
 	ARCH	?= -march=armv8-a+crc -mtune=cortex-a53 -mfpu=crypto-neon-fp-armv8 -mfloat-abi=hard -marm -mno-unaligned-access -DRPI3=1
 	CFLAGS	+= -DRPI3=1
 else
-	$(error RASPPI must be one of: 0, 1BRev1, 1BRev2, 1BPlus, 2, 3)
+# No tab in front of $(error): a tab indented line outside a rule is only
+# treated as a makefile statement when it is an assignment or a conditional,
+# so this one was read as a recipe and reported as "commands commence before
+# first target" - which says nothing about the RASPPI that was actually asked
+# for.
+$(error RASPPI must be one of: 0, 1BRev1, 1BRev2, 1BPlus, 2, 3)
 endif
 
 AFLAGS	 += $(ARCH)
 CFLAGS	 += $(ARCH) -Wall -Wno-unused-variable -Wno-unused-but-set-variable -Wno-psabi -fsigned-char -fno-builtin -Ofast -DNDEBUG
 CPPFLAGS := $(CFLAGS) $(CPPFLAGS) -fno-exceptions -fno-rtti -std=c++0x -Wno-write-strings
 CFLAGS	 += -fno-delete-null-pointer-checks -fdata-sections -ffunction-sections -u _printf_float -std=gnu99
+
+# Header dependencies. -MMD writes a .d file beside each .o listing the headers
+# that went into it, and -MP adds a phony target for each of those headers so a
+# deleted or renamed one does not turn into "No rule to make target".
+#
+# Without this the build only knew about .c and .cpp timestamps, and a great
+# deal of this emulator lives in headers - iec_bus.h is inlined into main.o,
+# m65c02.h carries the CPU core. Editing one of those and rebuilding produced a
+# kernel containing some of the change and not the rest, which on real hardware
+# is genuinely hard to tell apart from a bug in the change itself. The whole
+# tree had to be rebuilt every time to be sure.
+DEPFLAGS  = -MMD -MP
+CFLAGS   += $(DEPFLAGS)
+CPPFLAGS += $(DEPFLAGS)
 
 .PHONY: clean
 

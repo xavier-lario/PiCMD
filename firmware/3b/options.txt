@@ -3,9 +3,11 @@
 // Board: https://github.com/hackup/Pi1541io
 //
 // Put this file in the ROOT of the SD card. Uncommented lines are the working
-// configuration for that hardware; everything commented out shows the default.
-// This lists every option the emulator understands - anything not here is not
-// read.
+// configuration for that hardware. The commented ones show every remaining
+// option with the value you would most likely give it, which for a switch is
+// the value that turns it on rather than the default; where the default is
+// worth knowing the comment says what it is. This lists every option the
+// emulator understands - anything not here is not read.
 
 // ---------------------------------------------------------------------------
 // Hardware interface
@@ -14,10 +16,13 @@
 // Pi1541io is split line ("Option B") hardware.
 splitIECLines = 1
 
-// Leave these commented unless your board needs inversion.
-// The default suits a 7406; use invertIECOutputs = 0 for a 7407.
-//invertIECInputs = 1
-//invertIECOutputs = 0
+// Line inversion. The defaults shown here suit a 7406, which is what a
+// Pi1541io rev 4 has; use invertIECOutputs = 0 for a 7407. On non split line
+// wiring invertIECInputs is forced to 0 whatever is set here, and i2cBusMaster
+// is forced to 0 with it, because ATN then sits on GPIO2/GPIO3 - the pins
+// i2cBusMaster = 1 would want.
+//invertIECInputs = 0
+//invertIECOutputs = 1
 
 // GPIO used to pull the IEC ATN line low, so the drive can take control of the
 // bus and reprogram whichever drive currently owns device 8 or 9 when you press
@@ -46,18 +51,35 @@ CMDHDAtnOutGPIO = 24
 // brings it up on device 30 from the boot ROM.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image. Keeping a chunk in
-// RAM keeps writes off the card, and an SD access freezes the emulated drive
-// for as long as it takes. Halved automatically if it will not fit; the
-// ceiling on this hardware is about 32MB.
+// Size in MB of the RAM cache in front of the DHD image (default 24). Keeping
+// a chunk in RAM keeps writes off the card, and an SD access freezes the
+// emulated drive for as long as it takes. Halved automatically if it will not
+// fit; the ceiling on this hardware is about 32MB.
 //
-// The cache is WRITE-BACK: eject before cutting the power, or the last writes
-// may still be in RAM. See the note in README.md.
+// The cache is WRITE-BACK, not write-through: a write is acknowledged to the
+// computer as soon as it reaches RAM, and only reaches the card when the
+// serial bus goes quiet, when a dirty chunk has to be evicted to make room,
+// when the drive is reset, or on eject. It has to work that way - going to the
+// card mid-command freezes the emulated CPU for milliseconds at a time and the
+// bus gives up long before that.
+//
+// So the cache is also a window in which acknowledged writes exist only in the
+// Pi's RAM. Pulling the power, or the card, inside that window loses them, and
+// the volume is then partly stale rather than obviously broken. Reset flushes
+// what it can before carrying on, so reset-to-reboot is safe; yanking power is
+// not. Eject before cutting the power - see the note in README.md.
+//
+// A smaller cache narrows that window and flushes more often, at the cost of
+// more trips to the card. Try 4 if you are doing a lot of writing - installing
+// GEOS or Wheels onto a partition, say - and want less in flight.
 //CMDHDCacheMB = 24
 
 // Size in MB pinned into the cache at mount, from sector 0 (default 18). The
-// partition header, BAM and directory live there and are touched constantly.
-// Set to 0 to disable.
+// partition header, BAM and directory live there and are touched constantly,
+// so pinning them means they are never evicted. Set to 0 to disable. Never
+// takes more than three quarters of the cache, leaving room for other images
+// and for anything past the preloaded region, so lowering CMDHDCacheMB lowers
+// this with it.
 //CMDHDPreloadMB = 18
 
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
@@ -112,8 +134,9 @@ LCDName = ssd1306_128x64
 // The panel is monochrome, so a lit lamp is drawn as an inverse video block.
 CMDHDLcdLamps = 1
 
-// Splash image on the LCD at boot: 1541ii, 1541classic, or a PNG on the card.
-//LCDLogoName = 1541ii
+// Splash image on the LCD at boot: cmd (default), 1541ii, 1541classic,
+// or a raw 128x64 SSD1306 image on the card.
+//LCDLogoName = cmd
 
 // Scan the I2C bus at boot and list the addresses found, on the HDMI screen.
 // Only needed while getting a display working.

@@ -141,15 +141,39 @@ void ScsiImage::Detach()
 	{
 		// Retry before giving up. Below, every slot belonging to this image is
 		// invalidated, so whatever is still dirty at that point is gone - and
-		// this is the last chance to notice. A transient write error is worth
-		// a second attempt; a full card is not going to improve, but it is
-		// going to be reported instead of swallowed.
-		for (u32 attempt = 0; attempt < 3 && !Sync(true); ++attempt)
-			;
+		// this is the last chance to notice. A transient write error is worth a
+		// second attempt; a full card is not going to improve, but it is going
+		// to be reported instead of swallowed.
+		//
+		// Zero is the value that means everything went out, so the loop ends on
+		// == 0 and not on truth: read as a bool this would retry precisely when
+		// there was nothing left to retry.
+		int synced = 0;
+		for (u32 attempt = 0; attempt < 3; ++attempt)
+		{
+			synced = Sync(true);
+			if (synced == 0)
+				break;
+		}
+
+		// The file has to be closed regardless - there is nowhere else for the
+		// data to go - so all that is left is to say so loudly rather than
+		// invalidate the slots as if nothing had happened. The report only
+		// counts what is left; it must not flush again, or the diagnostic
+		// becomes a fourth write attempt and can announce nothing lost after
+		// quietly succeeding.
+		if (synced < 0)
+			DEBUG_LOG("SCSI: '%s' detached with unwritten data - DATA LOST\r\n", name);
+		else if (HasDirtyChunks())
+			DEBUG_LOG("SCSI: '%s' detached with chunks still dirty - DATA LOST\r\n", name);
+
 		if (needSync)
 			unflushedSectors += DirtySectorCount();
 
-		f_close(&file);
+		// f_close writes the directory entry, so it is the last chance for
+		// anything to go wrong and worth reporting too.
+		if (f_close(&file) != FR_OK)
+			DEBUG_LOG("SCSI: closing '%s' failed - the file may be truncated\r\n", name);
 		attached = false;
 
 		for (u32 i = 0; i < numAttachedImages; ++i)
@@ -176,29 +200,58 @@ void ScsiImage::Detach()
 	}
 }
 
-bool ScsiImage::Sync(bool force)
+int ScsiImage::Sync(bool force, u32 deadline)
 {
 	if (!attached || !needSync)
-		return true;
+		return 0;
 
 	// Only ever flush on demand. This used to run on a timer from the SCSI
 	// state machine returning to BUSFREE - which is between commands, exactly
 	// when the computer is about to poll for status. A single SD access has
 	// been measured at 35ms on this hardware, far longer than the bus will
 	// wait, so the drive vanished mid-transfer. Flushing now happens only when
-	// the bus has gone quiet (FlushIdle) or on detach.
+	// the bus has gone quiet (FlushIdle), on reset (FlushSome), or on detach.
 	if (!force)
-		return true;
+		return 0;
 
-	// needSync stays set when this fails, so the next quiet moment - or the
-	// next Detach - tries again rather than the data quietly ceasing to exist.
-	// No bound here: detach has to finish, and by then the bus is done with us.
-	if (FlushAllDirty(0, 0) != FLUSH_DONE)
-		return false;
+	// The dirty chunks stay dirty when this fails, so the next quiet moment -
+	// or the next Detach - tries again rather than the data quietly ceasing to
+	// exist. No chunk bound and no abort callback: everything that forces a
+	// flush is finishing rather than sharing the CPU with the bus, and the only
+	// limit such a caller cares about is the wall clock one it passed in.
+	FlushResult r = FlushAllDirty(0, 0, deadline);
 
-	f_sync(&file);
-	needSync = false;
-	return true;
+	// With no abort callback FLUSH_STOPPED can only mean a write failed, which
+	// is what lets this report a failure without a second out parameter.
+	bool failed = (r == FLUSH_STOPPED);
+
+	// Partial means "there is still dirty data", not "the budget was reached".
+	// Those differ when the budget lands exactly on the last chunk, and treating
+	// that as partial would skip f_sync and leave needSync set on a cache that
+	// is in fact clean.
+	bool partial = HasDirtyChunks();
+
+	// f_sync pushes FatFS's own metadata (the directory entry and FAT chain).
+	// Losing that loses the file, not just the sectors, so it counts too. Skip
+	// it on a partial pass: there is more to write, and this is the expensive
+	// part of a budgeted flush.
+	if (!partial && f_sync(&file) != FR_OK)
+		failed = true;
+
+	if (failed)
+	{
+		// Leave needSync set: the dirty chunks are still dirty and the next
+		// flush must try them again.
+		writeErrorPending = true;
+		++writeErrors;
+		DEBUG_LOG("SCSI: a chunk of '%s' would not write - data kept for retry\r\n", name);
+		return -1;
+	}
+
+	// Only clean if everything actually went out.
+	if (!partial)
+		needSync = false;
+	return partial ? 1 : 0;
 }
 
 // Sectors still marked dirty across every slot of this image: what would be
@@ -214,6 +267,35 @@ u32 ScsiImage::DirtySectorCount()
 		while (m) { n += (m & 1); m >>= 1; }
 	}
 	return n;
+}
+
+// Write a slot's dirty sectors back so it can be reused. Returns false if the
+// data could not be written and the slot must therefore be left alone.
+bool ScsiImage::EvictSlot(CacheSlot* victim)
+{
+	ScsiImage* owner = ImageById(victim->image);
+	if (!owner)
+	{
+		// The image was detached without this chunk being written. Nothing can
+		// write it now - the FIL is closed - so it is already lost; say so, and
+		// count the sectors with the rest of what did not survive, rather than
+		// quietly reusing the slot.
+		DEBUG_LOG("SCSI: dirty chunk for detached image %u dropped\r\n", victim->image);
+		++writeErrors;
+		u8 m = victim->dirtyMask;
+		while (m) { unflushedSectors += (m & 1); m >>= 1; }
+		victim->dirtyMask = 0;
+		return true;
+	}
+
+	if (owner->FlushChunk(*victim) != 0)
+	{
+		owner->writeErrorPending = true;
+		++writeErrors;
+		return false;
+	}
+
+	return true;
 }
 
 ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
@@ -246,19 +328,18 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!allocate)
 		return 0;
 
-	// Prefer an unused slot, then a clean one. Evicting a dirty chunk means a
+	// Invalid first, then clean, then dirty. Evicting a dirty chunk means a
 	// synchronous write to the card from whatever called us - including
 	// WriteSector, which must not go near it while the computer is polling for
-	// status. Only pick a dirty victim when the whole set is dirty.
+	// status - so a clean slot is worth taking even when the other way would be
+	// the more natural victim. Only pick a dirty one when the whole set is
+	// dirty.
 	CacheSlot* victim;
-	if (!slot->valid)
-		victim = slot;
-	else if (!slot2->valid)
-		victim = slot2;
-	else if (!slot->dirtyMask)
-		victim = slot;
-	else
-		victim = slot2;
+	if (!slot->valid)			victim = slot;
+	else if (!slot2->valid)		victim = slot2;
+	else if (!slot->dirtyMask)	victim = slot;
+	else if (!slot2->dirtyMask)	victim = slot2;
+	else						victim = slot;		// both dirty; one has to go
 
 	// Never drop writes on the floor. The chunk being evicted may belong to
 	// another image, so flush it through whoever owns it.
@@ -268,16 +349,28 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	// every way of the set is dirty, which in turn only happens when FlushIdle
 	// has not had a quiet moment to run - exactly the case during a long
 	// transfer. Count it so it stops being guesswork.
+	//
+	// If the chunk cannot be written - card full, card gone, or the owning
+	// image has been detached - it must not be evicted, because the cache is
+	// the only copy. Try the other way of the set, and if that is unwritable
+	// too, refuse to allocate. The caller then goes straight to the file,
+	// which is slow but reports its own failure honestly instead of losing the
+	// sectors in silence.
 	if (victim->valid && victim->dirtyMask)
 	{
 		dirtyEvictions++;
-		ScsiImage* owner = ImageById(victim->image);
-		if (!owner || owner->FlushChunk(*victim) != 0)
+		if (!EvictSlot(victim))
 		{
-			// The card would not take it. Leave the chunk dirty so a later
-			// flush can try again and hand the caller nothing, which sends it
-			// straight to the file - losing the sectors here would be silent.
-			return 0;
+			CacheSlot* other = (victim == slot) ? slot2 : slot;
+			if (other == victim)
+				return 0;
+			if (other->valid && other->dirtyMask)
+			{
+				dirtyEvictions++;
+				if (!EvictSlot(other))
+					return 0;
+			}
+			victim = other;
 		}
 	}
 
@@ -358,6 +451,31 @@ u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatil
 	if (!chunks)
 		return 0;
 
+	// Slots [0, chunks) are about to be claimed and read straight over. Some of
+	// them may already hold another image's chunks - mounting a second disk
+	// while the first is still up is enough - and any of those that are dirty
+	// are the only copy of a write the computer has already been told
+	// succeeded. Push those out through whoever owns them first, exactly as an
+	// eviction does. If one will not go, stop the preload short of it: a smaller
+	// pinned region costs a few card accesses later on, and reading over the
+	// chunk costs the user their data.
+	u32 usable = 0;
+	while (usable < chunks)
+	{
+		CacheSlot& slot = cacheSlots[usable];
+		if (slot.valid && slot.dirtyMask && !EvictSlot(&slot))
+			break;
+		++usable;
+	}
+	if (usable < chunks)
+	{
+		DEBUG_LOG("SCSI: preload cut from %u to %u chunks; slot %u would not write\r\n",
+			chunks, usable, usable);
+		chunks = usable;
+		if (!chunks)
+			return 0;
+	}
+
 	// Claim the region before filling it, so FindSlot hands back slot N for
 	// chunk N as each one lands.
 	pinnedChunks = chunks;
@@ -436,23 +554,26 @@ u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatil
 	return loaded;
 }
 
-#if PICMD_ACCESS_FORENSICS
+#if PICMD_WRITE_FORENSICS
 u8 ScsiImage::writeLogData[ScsiImage::WRITE_LOG_ENTRIES][ScsiImage::SECTOR_SIZE];
 u32 ScsiImage::writeLogLba[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogSeq[ScsiImage::WRITE_LOG_ENTRIES];
 u32 ScsiImage::writeLogCount = 0;
 #endif
 
+#if PICMD_ACCESS_FORENSICS
 // snprintf returns what it would have written, not what it did. Handing that
-// to f_write walks off the end of the buffer.
+// to f_write walks off the end of the buffer. Only the log dumps below format
+// text, so this lives with them rather than being carried by every build.
 static UINT Clamp(int produced, size_t capacity)
 {
 	if (produced < 0)
 		return 0;
 	return (UINT)((size_t)produced < capacity ? (size_t)produced : capacity - 1);
 }
+#endif
 
-#if PICMD_ACCESS_FORENSICS
+#if PICMD_WRITE_FORENSICS
 // Every write as it was handed to us, payload and all. Dumped on eject next to
 // the address log, so the two can be lined up by sequence number.
 bool ScsiImage::DumpWriteLog(const char* prefix)
@@ -522,9 +643,6 @@ void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
 	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].image = imageId;
 	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].result = result;
 	accessLogCount++;
-
-	if (op == 'W' && result == 0 && lba > maxLbaWritten)
-		maxLbaWritten = lba;
 }
 #endif
 
@@ -591,27 +709,78 @@ bool ScsiImage::DumpAccessLog(const char* prefix)
 }
 #endif
 
-// Returns true only when there is nothing left owed anywhere. False means come
-// back - the bus asked for the drive, a write failed, or the per-visit bound
-// was reached - and needSync is still set on whatever is left.
+u32 ScsiImage::writeErrors = 0;
+
+// FLUSH_DONE only when there is nothing left owed anywhere. Anything else means
+// come back - the bus asked for the drive, a write failed, or the per-visit
+// bound was reached - and needSync is still set on whatever is left.
 ScsiImage::FlushResult ScsiImage::FlushIdle(bool (*abort)())
 {
+	if (!numAttachedImages)
+		return FLUSH_DONE;
+
+	// Resume after the image serviced last time rather than starting at image
+	// zero on every visit. IDLE_FLUSH_CHUNKS is one, so an image being written
+	// to as fast as it drains is dirty every time the scan reaches it and the
+	// pass ends there - and the images behind it never get a single chunk
+	// written until it goes quiet. A cursor costs nothing and gives each of them
+	// the next turn.
+	static u32 nextImage = 0;
+	if (nextImage >= numAttachedImages)
+		nextImage = 0;
+
+	for (u32 n = 0; n < numAttachedImages; ++n)
+	{
+		u32 i = nextImage + n;
+		if (i >= numAttachedImages)
+			i -= numAttachedImages;
+
+		ScsiImage* img = attachedImages[i];
+		if (!img || !img->attached || !img->needSync)
+			continue;
+
+		// Stop the moment the bus wants us again rather than finishing the
+		// backlog regardless. f_sync only once there is nothing left, or it
+		// would be paying for metadata on every partial drain.
+		FlushResult r = img->FlushAllDirty(abort, IDLE_FLUSH_CHUNKS, 0);
+		if (r != FLUSH_DONE)
+		{
+			// Whatever stopped this one, the next visit starts with the image
+			// after it.
+			nextImage = (i + 1 < numAttachedImages) ? i + 1 : 0;
+			return r;
+		}
+		f_sync(&img->file);
+		img->needSync = false;
+	}
+	return FLUSH_DONE;
+}
+
+// As FlushIdle, but bounded in wall clock rather than in chunks and with
+// nothing to yield to: reset wants as much as fits in a fixed slice of real
+// time. Returns the number of images that could not be written.
+int ScsiImage::FlushSome(u32 maxMicros)
+{
+	int failed = 0;
+
+	// One deadline for the whole call, so the bound holds however many images
+	// are mounted rather than being per image.
+	u32 deadline = maxMicros ? (read32(ARM_SYSTIMER_CLO) + maxMicros) : 0;
+
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			break;
+
 		ScsiImage* img = attachedImages[i];
 		if (img && img->attached && img->needSync)
 		{
-			// Stop the moment the bus wants us again rather than finishing the
-			// backlog regardless. f_sync only once there is nothing left, or it
-			// would be paying for metadata on every partial drain.
-			FlushResult r = img->FlushAllDirty(abort, IDLE_FLUSH_CHUNKS);
-			if (r != FLUSH_DONE)
-				return r;
-			f_sync(&img->file);
-			img->needSync = false;
+			if (img->Sync(true, deadline) < 0)
+				++failed;
 		}
 	}
-	return FLUSH_DONE;
+
+	return failed;
 }
 
 u32 ScsiImage::DirtyChunkCount()
@@ -623,6 +792,11 @@ u32 ScsiImage::DirtyChunkCount()
 			n++;
 	}
 	return n;
+}
+
+int ScsiImage::FlushAll()
+{
+	return FlushSome(0);
 }
 
 ScsiImage* ScsiImage::ImageById(u8 id)
@@ -751,6 +925,25 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 	return 0;
 }
 
+int ScsiImage::ReadSectorPhysical(u32 lba, u8* buffer)
+{
+	accessCounter++;
+	if (!attached)
+		return -1;
+
+	if (lba >= sizeInSectors)
+		return -1;
+
+	UINT bytesRead = 0;
+	u32 t0 = read32(ARM_SYSTIMER_CLO);
+	if (f_lseek(&file, (u64)lba << 9) != FR_OK)
+		return -1;
+	if (f_read(&file, buffer, SECTOR_SIZE, &bytesRead) != FR_OK || bytesRead != SECTOR_SIZE)
+		return -1;
+	NoteStall(t0);
+	return 0;
+}
+
 int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 {
 	accessCounter++;
@@ -772,7 +965,9 @@ int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 	// If the sector happens to be cached, take it from there - but never fill
 	// the cache on its account. A slot being valid only says the chunk is
 	// allocated: a write leaves the other seven sectors of it holding whatever
-	// was there before, so the per sector bit has to be checked as well.
+	// was there before, so the per sector bit has to be checked as well. Handing
+	// that uninitialised RAM back as disk contents is how the whole disk scan
+	// ends up finding a CMD signature that was never on the card.
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
 	CacheSlot* slot = FindSlot(lba / SECTORS_PER_CHUNK, false);
 	if (slot && slot->valid && (slot->validMask & (1 << sectorInChunk)))
@@ -805,6 +1000,14 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 	}
 
 	LogAccess(lba, 'W', 0);
+
+	// Kept here rather than in LogAccess, which compiles to nothing unless
+	// PICMD_ACCESS_FORENSICS is on - and it is off in every build anyone runs,
+	// so the highest LBA on the status line read zero for ever while looking
+	// like it worked. A compare and a store on a path that is about to do a 512
+	// byte memcpy is not worth being clever about.
+	if (lba > maxLbaWritten)
+		maxLbaWritten = lba;
 
 #if PICMD_WRITE_FORENSICS
 	// Keep the payload too. accessLogCount has just been bumped past this
@@ -886,7 +1089,13 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 
 // Push a chunk's dirty sectors out to the card, in as few writes as the
 // runs of set bits allow.
-int ScsiImage::FlushChunk(CacheSlot& slot)
+//
+// deadline (0 for none) is checked between runs, so a budgeted flush can stop
+// part way through a chunk. That is safe because only the bits that actually
+// reached the card are cleared - what is left simply stays dirty. Eviction
+// passes no deadline: it needs the whole chunk out before it can reuse the
+// slot.
+int ScsiImage::FlushChunk(CacheSlot& slot, u32 deadline)
 {
 	if (!slot.valid || !slot.dirtyMask)
 		return 0;
@@ -895,6 +1104,9 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	while (s < SECTORS_PER_CHUNK)
 	{
 		if (!(slot.dirtyMask & (1 << s))) { ++s; continue; }
+
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			return 0;
 
 		u32 run = 1;
 		while (s + run < SECTORS_PER_CHUNK && (slot.dirtyMask & (1 << (s + run))))
@@ -906,58 +1118,120 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 		if (f_lseek(&file, offset) != FR_OK)
 			return -1;
 		// A short write is not an error as far as FatFS is concerned - a full
-		// card returns FR_OK having written less than asked. Treat it as one,
-		// or the caller clears dirtyMask on sectors that never reached the SD.
+		// card returns FR_OK having written less than it was asked for. Treat it
+		// as one, or the dirty bits below get cleared on sectors that never
+		// reached the SD and the only copy of them goes away.
 		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK
 			|| written != run * SECTOR_SIZE)
 			return -1;
 		NoteStall(t0);
+
+		// Clear only what actually reached the card, so a failure part way
+		// through a chunk leaves the rest dirty for the next attempt.
+		slot.dirtyMask &= (u8)~(((1 << run) - 1) << s);
 		s += run;
 	}
 
-	slot.dirtyMask = 0;
 	return 0;
 }
 
-ScsiImage::FlushResult ScsiImage::FlushAllDirty(bool (*abort)(), u32 maxChunks)
+ScsiImage::FlushResult ScsiImage::FlushAllDirty(bool (*abort)(), u32 maxChunks, u32 deadline)
 {
 	u32 done = 0;
 
-	for (u32 i = 0; i < numCacheSlots; ++i)
+	// Where the last pass stopped. A bounded visit writes one chunk and comes
+	// back on the next slow tick, so restarting at slot zero every time meant
+	// walking the whole cache - sixteen thousand slots on a full sized one - to
+	// reach the chunk after the one just written. It is only a starting point:
+	// the loop still goes the whole way round, so an unbounded pass finds every
+	// dirty chunk whatever the cursor happens to be, and that is also why every
+	// image can share it. A stale cursor costs a lap of comparisons, never a
+	// missed chunk.
+	static u32 cursor = 0;
+	if (cursor >= numCacheSlots)
+		cursor = 0;
+
+	for (u32 n = 0; n < numCacheSlots; ++n)
 	{
+		u32 i = cursor + n;
+		if (i >= numCacheSlots)
+			i -= numCacheSlots;
+
 		if (!(cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId))
 			continue;
+
 		// Asked before committing to the write, not after: once FlushChunk is
 		// under way the CPU is frozen for as long as the card takes.
 		//
-		// And asked BEFORE the bound below, not after. The other order looks
+		// And asked BEFORE the bounds below, not after. The other order looks
 		// harmless and is not: with a bound of one chunk the function would
-		// return at the second dirty slot without ever evaluating abort, so
-		// the callback would become a thing that cannot fire - which is the
-		// failure mode this project has documented three times.
+		// return at the second dirty slot without ever evaluating abort, so the
+		// callback would become a thing that cannot fire - which is the failure
+		// mode this project has documented three times.
 		if (abort && abort())
+		{
+			cursor = i;
 			return FLUSH_STOPPED;
+		}
 
-		// Stop after maxChunks and let the caller come back. The emulated CPU
-		// is frozen for every card write in this loop, and unbounded that came
-		// to 48 milliseconds in one go on a GEOS installation - measured, the
-		// worst overrun in PICMD-LST37.LOG. A bound turns one long freeze into
-		// several short ones with the loop running in between. maxChunks == 0
-		// means no bound, for detach, where finishing matters more than
-		// latency.
+		// Stop after maxChunks and let the caller come back. The emulated CPU is
+		// frozen for every card write in this loop, and unbounded that came to 48
+		// milliseconds in one go on a GEOS installation - measured, the worst
+		// overrun in PICMD-LST37.LOG. A bound turns one long freeze into several
+		// short ones with the loop running in between. maxChunks == 0 means no
+		// chunk bound, for detach, where finishing matters more than latency.
 		if (maxChunks && done >= maxChunks)
+		{
+			cursor = i;
 			return FLUSH_MORE;
-		// FlushChunk leaves dirtyMask set on purpose when the write did not
-		// land, so the caller can come back for it. Dropping the return here
-		// turned that into "we tried once and then forgot": Sync cleared
-		// needSync on the strength of a true that meant nothing, and Detach
-		// invalidated the slots underneath. A full or failing card lost the
-		// user's sectors without a word.
-		if (FlushChunk(cacheSlots[i]) != 0)
+		}
+
+		// The other bound is wall clock, for the reset flush. A chunk is up to
+		// four separate writes when its dirty sectors are not contiguous, so a
+		// chunk count bounds the work only to within a factor of four, and an
+		// absolute deadline shares itself across images for free. Signed
+		// difference, so it stays right across the timer's ~71.6 minute wrap.
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+		{
+			cursor = i;
+			return FLUSH_MORE;
+		}
+
+		// FlushChunk leaves dirtyMask set on purpose when the write did not land,
+		// so the caller can come back for it. Dropping the return here turned
+		// that into "we tried once and then forgot": Sync cleared needSync on the
+		// strength of a true that meant nothing, and Detach invalidated the slots
+		// underneath. A full or failing card lost the user's sectors without a
+		// word.
+		if (FlushChunk(cacheSlots[i], deadline) != 0)
+		{
+			cursor = i;
 			return FLUSH_STOPPED;
+		}
+
+		// The deadline can also stop FlushChunk between the runs inside one
+		// chunk, which it reports by leaving those sectors dirty rather than by
+		// failing. Come back to this same slot next time instead of stepping past
+		// it and picking the remainder up a whole lap later.
+		if (cacheSlots[i].dirtyMask)
+		{
+			cursor = i;
+			return FLUSH_MORE;
+		}
+
 		++done;
 	}
 	return FLUSH_DONE;
+}
+
+bool ScsiImage::HasDirtyChunks() const
+{
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
+			return true;
+	}
+	return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -990,6 +1264,28 @@ static u32 scsi_getmaxsize(scsi_context_t* context)
 
 	/* not a valid file, return 0 */
 	return 0;
+}
+
+// A background flush failed since the last command was processed. The host was
+// told that write succeeded and cannot be told otherwise, so it gets reported
+// against a later command instead.
+//
+// Called from TEST UNIT READY, READ and WRITE - not from every command. Those
+// three are what a host actually does after writing (and TEST UNIT READY is
+// what it polls with), so the failure surfaces promptly in practice. The
+// commands that do not check - READ CAPACITY, MODE SENSE and friends - are
+// ones a host issues about the device rather than about its data, and adding
+// the check there would report a data error in answer to a question that was
+// not about data.
+static s32 scsi_imagecheck(scsi_context_t* context);
+
+static bool scsi_take_deferred_write_error(scsi_context_t* context)
+{
+	if (scsi_imagecheck(context))
+		return false;
+
+	ScsiImage* image = context->file[(context->target << 3) | context->lun];
+	return image && image->TakeWriteError();
 }
 
 static s32 scsi_imagecheck(scsi_context_t* context)
@@ -1086,7 +1382,8 @@ s32 scsi_image_write(scsi_context_t* context)
 
 /* default format handler */
 /* We don't actually format the disk, we just zero out the first sector */
-static void scsi_format_sector0(scsi_context_t* context)
+/* Returns 0 on success, non-zero if the write did not happen. */
+static s32 scsi_format_sector0(scsi_context_t* context)
 {
 	s32 i;
 
@@ -1097,7 +1394,10 @@ static void scsi_format_sector0(scsi_context_t* context)
 		context->data_buf[i] = 0;
 	}
 
-	scsi_image_write(context);
+	// The result matters: on read-only media or a failing card this write does
+	// not happen, and reporting FORMAT UNIT as successful when the disk is
+	// untouched is worse than reporting the failure.
+	return scsi_image_write(context);
 }
 
 u8 scsi_get_bus(scsi_context_t* context)
@@ -1269,8 +1569,26 @@ void scsi_process_ack(scsi_context_t* context)
 					context->command == SCSI_COMMAND_WRITE_10 ||
 					context->command == SCSI_COMMAND_WRITE_VERIFY)
 				{
-					if (scsi_image_write(context))
+					// A deferred flush failed since the last host command. The
+					// computer was told that earlier write succeeded and cannot
+					// be told otherwise now, so report it against this one and
+					// let HDOS surface it. The data is still dirty in the cache
+					// and will be retried.
+					//
+					// This is checked here rather than inside WriteSector so
+					// that the drive's own internal writes - the base LBA scan,
+					// the format handler - cannot consume the latched error
+					// before the host ever sees it.
+					ScsiImage* img = scsi_imagecheck(context) ? 0 :
+						context->file[(context->target << 3) | context->lun];
+
+					if (scsi_image_write(context) || (img && img->TakeWriteError()))
 					{
+						// Say why, so REQUEST SENSE returns something
+						// meaningful instead of whatever was left over from
+						// the last command.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;
@@ -1315,9 +1633,21 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
-						context->status = SCSI_STATUS_GOOD;
+						// Run the handler first and report what it did. This used to set
+						// GOOD before calling it and ignore the result, so a format that
+						// never touched the disk - read only media, a failing card -
+						// still looked like a success.
 						context->state = SCSI_STATE_STATUS;
-						context->user_format(context);
+						if (context->user_format(context))
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							context->status = SCSI_STATUS_GOOD;
+						}
 					}
 				}
 				else if (context->command == SCSI_COMMAND_REASSIGN_BLOCKS)
@@ -1325,13 +1655,38 @@ void scsi_process_ack(scsi_context_t* context)
 					/* accept defect list, just don't do anything about it */
 					if (context->seq == 4)
 					{
-						context->seq = ((context->data_buf[0] << 24) |
-							(context->data_buf[1] << 16) |
-							(context->data_buf[2] << 8) |
+						// Defect list length is bytes 2-3 of the header; 0-1
+						// are reserved. It also belongs in data_max - the
+						// count of bytes still to come - not in seq, which is
+						// the index the next byte is stored at. Assigning it
+						// to seq meant the byte after the header landed at
+						// data_buf[length], and capped at 512 on a 512 byte
+						// buffer that is one past the end.
+						u32 listBytes = ((context->data_buf[2] << 8) |
 							(context->data_buf[3])) + 4;
-						if (context->seq >= sizeof(context->data_buf))
+
+						if (listBytes > sizeof(context->data_buf))
 						{
-							context->seq = sizeof(context->data_buf) - 1;
+							// Do not quietly truncate and then report success:
+							// that changes phase while the initiator still has
+							// data to send. Say the field is wrong instead.
+							context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+							context->asc = SCSI_SASC_INVALIDFIELDINPARAMETERLIST;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+							context->state = SCSI_STATE_STATUS;
+						}
+						else
+						{
+							context->data_max = listBytes;
+
+							// An empty list leaves nothing to receive, so
+							// finish here rather than waiting for a byte that
+							// is not coming.
+							if (context->seq >= context->data_max)
+							{
+								context->status = SCSI_STATUS_GOOD;
+								context->state = SCSI_STATE_STATUS;
+							}
 						}
 					}
 					else
@@ -1400,16 +1755,28 @@ void scsi_process_ack(scsi_context_t* context)
 				case SCSI_COMMAND_TEST_UNIT_READY:
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[5] & 1;
+					context->state = SCSI_STATE_STATUS;
 					if (scsi_imagecheck(context))
 					{
-						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						// Nothing attached is NOT READY / medium not present,
+						// not ILLEGAL REQUEST - and it used to set no ASC at
+						// all, so the sense described the previous command.
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
-						context->state = SCSI_STATE_STATUS;
+					}
+					else if (scsi_take_deferred_write_error(context))
+					{
+						// This is the command a host polls with, so it is the
+						// one most likely to be the first thing issued after
+						// the writing has finished.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
 					}
 					else
 					{
 						context->status = SCSI_STATUS_GOOD;
-						context->state = SCSI_STATE_STATUS;
 					}
 					break;
 				case SCSI_COMMAND_REQUEST_SENSE:
@@ -1431,9 +1798,28 @@ void scsi_process_ack(scsi_context_t* context)
 					context->data_buf[0] = 0x80 | 0x70;
 					context->data_buf[1] = 0x00;
 					context->data_buf[2] = context->sensekey;
+					// Additional sense length: the count of bytes after byte 7.
+					// Eighteen byte fixed format sense means 10. It was left at
+					// zero, which tells a compliant initiator that byte 12 -
+					// the ASC it is being handed - is not there.
+					context->data_buf[7] = 10;
 					context->data_buf[12] = context->asc;
 					context->status = SCSI_STATUS_GOOD;
-					context->state = SCSI_STATE_STATUS;
+
+					// Hand the sense data back, rather than going straight to
+					// STATUS with GOOD and never sending it. Building the
+					// eighteen bytes and then dropping them meant the host
+					// could tell that a command had failed but never why -
+					// every CHECK CONDITION in this file was effectively
+					// reasonless.
+					context->state = SCSI_STATE_DATAIN;
+					context->seq = 0;
+
+					// Sense is consumed by reading it. Leaving it latched
+					// makes the next REQUEST SENSE describe an error that has
+					// already been reported and dealt with.
+					context->sensekey = SCSI_SENSEKEY_NOSENSE;
+					context->asc = 0;
 					break;
 				case SCSI_COMMAND_REASSIGN_BLOCKS:
 					context->state = SCSI_STATE_DATAOUT;
@@ -1472,10 +1858,31 @@ void scsi_process_ack(scsi_context_t* context)
 						}
 					}
 					context->data_max = 512;
+
+					// "Is there a disk" before "is that block on the disk".
+					// The other way round, an absent image has a maximum size
+					// of zero, so every LBA failed as out of range and the
+					// medium-not-present case was unreachable.
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
 					if (context->address >= scsi_getmaxsize(context))
 					{
 						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
 						context->asc = SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
+					if (scsi_take_deferred_write_error(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;
@@ -1487,6 +1894,8 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 					}
@@ -1524,6 +1933,18 @@ void scsi_process_ack(scsi_context_t* context)
 						}
 					}
 					context->data_max = 512;
+
+					// Same ordering point as the read path: without this, an absent image
+					// has a maximum size of zero so every LBA fails as out of range and
+					// the medium-not-present case below is unreachable.
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
 					if (context->address >= scsi_getmaxsize(context))
 					{
 						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
@@ -1539,6 +1960,11 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
+						// No image attached at that target/LUN, which is a
+						// different thing from a media error and worth saying
+						// so - HDOS can tell "no disk" from "bad disk".
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 					}
@@ -1585,6 +2011,20 @@ void scsi_process_ack(scsi_context_t* context)
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[9] & 1;
 					context->data_max = 8;
+
+					// Say there is no medium rather than describing an absent
+					// one as a zero length disk. Every other command checks
+					// this; capacity did not, and eight zero bytes with GOOD
+					// reads as "a disk, empty" instead of "no disk".
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
+
 					j = scsi_getmaxsize(context);
 					if (j == 0)
 					{
@@ -1669,9 +2109,17 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else if ((context->cmd_buf[1] & 0x17) == 0x00)
 					{
-						context->status = SCSI_STATUS_GOOD;
 						context->state = SCSI_STATE_STATUS;
-						context->user_format(context);
+						if (context->user_format(context))
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							context->status = SCSI_STATUS_GOOD;
+						}
 					}
 					else
 					{
@@ -1690,10 +2138,84 @@ void scsi_process_ack(scsi_context_t* context)
 					context->state = SCSI_STATE_STATUS;
 					break;
 				case SCSI_COMMAND_VERIFY:
+					// This used to answer GOOD without looking at anything -
+					// no media check, no range check, no read - so a verify
+					// pronounced missing, out of range or unreadable sectors
+					// healthy, which is worse than not supporting it. Check
+					// what can be checked cheaply and read the blocks back.
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[9] & 1;
-					context->status = SCSI_STATUS_GOOD;
+					context->address = (context->cmd_buf[2] << 24) |
+						(context->cmd_buf[3] << 16) |
+						(context->cmd_buf[4] << 8) | (context->cmd_buf[5]);
+					context->blocks = (context->cmd_buf[7] << 8) | (context->cmd_buf[8]);
 					context->state = SCSI_STATE_STATUS;
+
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else if (context->blocks &&
+						(context->address >= scsi_getmaxsize(context) ||
+						 context->address + context->blocks > scsi_getmaxsize(context)))
+					{
+						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						context->asc = SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else if (scsi_take_deferred_write_error(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else if (context->cmd_buf[1] & 0x02)		// BYTCHK
+					{
+						// The initiator wants the blocks compared against data
+						// it is about to send. That needs a data-out phase and
+						// a comparison, neither of which is implemented - and
+						// answering GOOD would be claiming to have done a
+						// byte-for-byte check that never happened, which is
+						// the worst possible answer to give a verify.
+						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						context->asc = SCSI_SASC_INVALIDFIELDINCDB;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else
+					{
+						// Read each block off the card itself.
+						//
+						// Not through the cache: that would verify the cache.
+						// A sector written a moment ago, or read earlier and
+						// still resident, comes back perfectly from a card
+						// that has since been pulled. Flush first as well, or
+						// the media is checked against contents the computer
+						// has been told are on it but are not yet.
+						ScsiImage* image = context->file[(context->target << 3) | context->lun];
+						context->status = SCSI_STATUS_GOOD;
+
+						if (image->Sync(true) < 0)
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							for (u32 b = 0; b < (u32)context->blocks; ++b)
+							{
+								if (image->ReadSectorPhysical(context->address + b, context->data_buf) != 0)
+								{
+									context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+									context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
+									context->status = SCSI_STATUS_CHECKCONDITION;
+									break;
+								}
+							}
+						}
+					}
 					break;
 				}
 			}
@@ -1733,6 +2255,11 @@ void scsi_process_ack(scsi_context_t* context)
 					/* read it, report error if a problem */
 					if (scsi_image_read(context))
 					{
+						// As on the write path: set the sense as well as the
+						// status, or REQUEST SENSE describes whatever the last
+						// command left behind.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;

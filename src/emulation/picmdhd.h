@@ -44,8 +44,11 @@ public:
 	PiCMDHD();
 
 	void Initialise();
-	void Update();
-	void SlowTick(u32 emulatedCycles);		// One 2MHz CPU cycle worth of house keeping.
+	void Update();							// One 2MHz CPU cycle worth of house keeping.
+	// The parts of that house keeping that do not need to happen every cycle,
+	// batched up and called from the slow tick with the number of emulated CPU
+	// cycles since the last call.
+	void SlowTick(u32 emulatedCycles);
 	void Reset();
 
 	// Attach the DHD image (SCSI ID 0 LUN 0) plus any companion .sXY files.
@@ -247,7 +250,7 @@ public:
 private:
 	friend void cmdhd_scsiread(scsi_context_t* scsi);
 	friend void cmdhd_scsiwrite(scsi_context_t* scsi);
-	friend void cmdhd_scsiformat(scsi_context_t* scsi);
+	friend s32 cmdhd_scsiformat(scsi_context_t* scsi);
 
 	void FindBaseLBA();
 	void UpdateButtonInputs();

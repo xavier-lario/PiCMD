@@ -128,6 +128,10 @@ manual describes it.** That includes a good deal Pi1541 never supported:
 - **JiffyDOS**, which HDOS implements itself, and C128 burst/fast serial.
 - **GEOS**, using the GEOS/HD driver HD-TOOLS installs alongside HDOS.
 
+The manual is the reference for all of it, and a scan of the fourth edition
+(January 1991) is in this repository:
+[CMD_Hard_Drive_Users_Manual_4th_Edition_Jan_1991.pdf](CMD_Hard_Drive_Users_Manual_4th_Edition_Jan_1991.pdf).
+
 ### Front panel buttons
 
 The real CMD HD has four front panel buttons: **SWAP 8**, **SWAP 9**,
@@ -236,6 +240,14 @@ quick from then on.
 //CMDHDLcdLamps = 1
 ```
 
+A smaller cache narrows the window in which acknowledged writes exist only in
+RAM, at the cost of more trips to the card. That is worth considering before a
+long spell of writing - installing GEOS or Wheels onto a partition, say - where
+the bus may never go quiet long enough for the idle flush to run. It also caps
+the preload: `CMDHDPreloadMB` never takes more than three quarters of the
+cache, so that other images and anything past the preloaded region still have
+somewhere to go.
+
 ### Device numbers
 
 The drive's device number is a **configuration parameter stored on the disk**,
@@ -279,29 +291,32 @@ configuration block the override behaves normally.
 
 ### The front panel lamps on an LCD
 
-If you have an I2C display configured (`LCDName`), the drive's six indicator
-lamps are shown on it while emulating:
+If you have an I2C display configured (`LCDName`), the drive's indicator lamps
+are shown on it while emulating, with a POWER tile added:
 
 ```
 POWER   ACTIVE
 ERROR   WR PROT
-DRIVE 8 DRIVE 9
+D8  D9  GEOS
 <track / temperature>
 ```
+
+The bottom row uses short tags whatever the panel size - three names will not
+fit across sixteen characters as full words.
 
 These OLED panels are **monochrome**, so a lit lamp cannot be a different
 colour - it is drawn as an **inverse video block** (a solid bar with the name
 knocked out of it), which is easy to read at a glance. Unlit lamps are plain
 text.
 
-POWER is lit whenever the drive is running. The other five come straight from
+POWER is lit whenever the drive is running. The other six come straight from
 the U20 latch, so they behave exactly as the real panel does - including the
 SWAP lamps lighting when the drive has swapped to device 8 or 9, WR PROT
 following the write protect state, and the lamps being used as a binary digit
 display in FPPS mode.
 
 On a 128x32 display, or any panel with room for fewer than four text rows,
-the layout falls back to short tags (`PWR ACT ERR WP` / `D8 D9`) and the
+the layout falls back to short tags (`PWR ACT ERR WP` / `D8 D9 GEOS`) and the
 track line is dropped.
 
 Set `CMDHDLcdLamps = 0` to leave the LCD showing only what Pi1541 showed.
@@ -316,15 +331,20 @@ the serial bus, which requires driving **ATN**.
 Pi1541 never drove ATN, so whether your board can do so at all is board
 specific, and the pin differs:
 
-| Board | ATN output |
+| Wiring | ATN output |
 |---|---|
-| [Pi1541io](https://github.com/hackup/Pi1541io) (hackup) | GPIO 2 (header pin 3) |
+| Split lines, as on a [Pi1541io](https://github.com/hackup/Pi1541io) rev 4 | GPIO 24 (header pin 18) |
 | Pi1541 documented split line pinout | GPIO 12 (header pin 32) |
+| Non split lines | GPIO 2 (header pin 3) |
 
 Set `CMDHDAtnOutGPIO` accordingly. It is **0 (disabled) by default**, because
-driving the wrong pin is worse than not driving one at all - and on a Pi1541io
-rev 4, GPIO 2 is shared with I2C1 SDA, so it must not be combined with a
-display on I2C bus 1.
+driving the wrong pin is worse than not driving one at all.
+
+On a Pi1541io rev 4 the answer is GPIO 24: that is already where the split line
+build reads ATN, and the BSS138 level shifter on that line is bidirectional, so
+the same pin can pull it low. Do not use GPIO 2 on that board - it carries ATN
+only in the non split wiring, and it is shared with I2C1 SDA, so it must not be
+combined with a display on I2C bus 1.
 
 With it disabled (or if your board has no ATN driver) the drive still swaps
 its *own* device number correctly. What it cannot do is move another drive out
@@ -390,16 +410,28 @@ ROM is not there and is gitignored - it is not ours to redistribute - and
 - Supported Pi models: 3B/3B+ recommended (RASPPI=3 build). The 2MHz 65C02
   plus two VIAs is more work per microsecond than a 1MHz 1541; Pi Zero
   builds compile but are not expected to keep up.
-- DHD images are streamed from the SD card through a **write-back** cache
+- DHD images are streamed from the SD card through a RAM cache
   (`CMDHDCacheMB`). A cache miss stalls the emulated CPU for the duration
   of the SD access, exactly as if the SCSI drive were slow to respond.
-- **Eject before you cut the power.** Because the cache is write-back, a
-  write the computer believes it has completed may still be in RAM. It
-  reaches the card when the bus has been quiet for half a second, when a
-  dirty chunk has to be evicted, or when the image is ejected - and during
-  a long operation like a GEOS installation the quiet moment may not come
-  at all. Ejecting from the menu, or exiting emulation, flushes everything.
-  Pulling the plug mid-session can lose the last writes.
+- That cache is **write-back**, not write-through. A write is acknowledged to
+  the computer as soon as it reaches RAM, and only reaches the card when the
+  serial bus has been quiet for half a second, when a dirty chunk has to be
+  evicted to make room, when the drive is reset, or on eject. It has to work
+  that way: going to the card mid-command freezes the emulated CPU for
+  milliseconds at a time - the worst single access measured on this hardware
+  is 4,959us - and the serial bus gives up long before that.
+- **Eject before you cut the power.** Write-back leaves a window in which a
+  write the computer believes it has completed exists only in the Pi's RAM,
+  and during a long operation like a GEOS installation the quiet moment that
+  would drain it may never come. Ejecting from the menu, or exiting
+  emulation, flushes everything; a reset flushes as much as fits in 50ms and
+  leaves the rest to the next idle moment, so reset-to-reboot is safe.
+  Pulling the plug, or the card, mid-session loses whatever is still in
+  flight - and the volume is then partly stale rather than obviously broken.
+- A flush that fails throws nothing away: the chunk keeps its dirty bits for
+  the next attempt, the slot is not reused for anything else, and the drive
+  answers its next command with CHECK CONDITION / MEDIUM ERROR rather than
+  letting the computer go on believing a write landed.
 - Fast serial (C128 burst) is wired through U10's shift register at the bit
   level and SRQ is sampled/driven as the 1581 build did. C64 use (including
   JiffyDOS, which HDOS implements in software) is unaffected.
@@ -423,6 +455,7 @@ src/
 ├── emulation/              the CMD HD: R65C02, two 6522 VIAs, the 8255A PPI,
 │                           the RTC, SCSI, the machine, and the IEC bus
 └── ui/                     screen, I2C LCD, fonts, file browser, input
+tests/                      host tests, with hardware stubbed out in shims/
 target/                     all build output; nothing is written into src/
 ```
 
@@ -451,31 +484,53 @@ make RASPPI=3          # produces target/kernel.img
 
 `RASPPI=2` and `RASPPI=0` (Pi Zero) also build, though only the Pi 3 is tested.
 `make clean` removes `target/` outright, so a clean build costs nothing but
-time.
+time. Switching target cleans for you: objects built for one `RASPPI` are not
+interchangeable with another's - different `-march`/`-mtune` flags, different
+conditional code - and nothing in their names or timestamps says which, so the
+build keeps a stamp naming the target it last built and wipes `target/` when
+you ask for a different one.
 
 On Windows, `build.bat` finds the toolchain and the right make for you, and
-avoids two traps worth knowing about:
+avoids a trap worth knowing about:
 
 ```
-build.bat            clean build for a Pi 3
-build.bat 2          clean build for a Pi 2
-build.bat 3 quick    incremental
+build.bat            incremental build for a Pi 3
+build.bat 2          incremental build for a Pi 2
+build.bat 3 clean    full rebuild
 ```
 
-1. **`make` must be MSYS2's**, not GnuWin32's. GnuWin32 make gets part way and
-   then fails on the recursive sub-make for `uspi`, because its own install
-   path contains spaces and brackets (`C:\Program Files (x86)\...`) which the
-   shell it invokes cannot parse. The error is a shell syntax error near `(`
-   and looks nothing like a build problem. If both are installed, GnuWin32 is
-   usually first on `PATH`, so this is the default outcome rather than an edge
-   case.
+**`make` must be MSYS2's**, not GnuWin32's. GnuWin32 make gets part way and
+then fails on the recursive sub-make for `uspi`, because its own install path
+contains spaces and brackets (`C:\Program Files (x86)\...`) which the shell it
+invokes cannot parse. The error is a shell syntax error near `(` and looks
+nothing like a build problem. If both are installed, GnuWin32 is usually first
+on `PATH`, so this is the default outcome rather than an edge case.
 
-2. **The Makefile does not track header dependencies**, and a good deal of this
-   emulator lives in headers - `iec_bus.h` is inlined into `main.o`, for
-   instance. An incremental build after editing a header yields a kernel
-   containing only some of your changes, which is unpleasant to debug on real
-   hardware. `build.bat` cleans first unless you say `quick`; with plain `make`,
-   run `make clean` before any build you intend to flash.
+Header dependencies are tracked (`-MMD -MP` writes a `.d` beside each object),
+so editing a header rebuilds everything that includes it and nothing else.
+That matters here because a good deal of this emulator lives in headers -
+`iec_bus.h` is inlined into `main.o`, `m65c02.h` carries the CPU core - and
+before this was in place an incremental build after editing one produced a
+kernel with part of the change in it, which on real hardware looks exactly
+like a bug in the change. `make clean` is no longer needed before a build you
+intend to flash.
+
+### Tests
+
+The emulation modules reach hardware through a handful of free functions and
+nothing else, so the pure logic in them builds and runs on a desktop compiler
+with those stubbed out. The sources under test are compiled **unmodified** -
+the substitution happens on the include path, with `tests/shims/` sitting ahead
+of the real headers, so nothing in `src/` carries a test-only `#ifdef`.
+
+```
+make -C tests               build and run
+make -C tests SANITIZE=1    with ASan and UBSan (Linux and macOS)
+```
+
+See [tests/README.md](tests/README.md) for what is covered and where the seam
+is. CI runs these and the kernel build for `RASPPI=0`, `2` and `3` on every
+push to main and every pull request.
 
 ## Licence & credits
 
